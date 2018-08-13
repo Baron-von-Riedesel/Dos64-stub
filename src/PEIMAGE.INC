@@ -1,4 +1,6 @@
 
+;--- some constants and structures
+;--- for 64-bit PE images.
 
 SECTION_QUERY       equ 00001h
 SECTION_MAP_WRITE   equ 00002h
@@ -351,6 +353,11 @@ IMAGE_REL_I386_SECREL      equ   0000Bh
 IMAGE_REL_I386_TOKEN       equ   0000Ch  ;// clr token
 IMAGE_REL_I386_SECREL7     equ   0000Dh  ;// 7 bit offset from base of section containing target
 IMAGE_REL_I386_REL32       equ   00014h  ;// PC-relative 32-bit reference to the symbols virtual address
+
+IMAGE_REL_BASED_ABSOLUTE   equ 0  ;/* relocation is skipped */
+IMAGE_REL_BASED_HIGH       equ 1  ;/* high 16-bits of a 32-bit target */
+IMAGE_REL_BASED_LOW        equ 2  ;/* low 16-bits of a 32-bit target */
+IMAGE_REL_BASED_DIR64      equ 10 ;/* 64-bit target */
 
 
 IMAGE_BASE_RELOCATION struct

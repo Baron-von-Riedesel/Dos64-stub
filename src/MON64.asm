@@ -42,6 +42,8 @@ lbuffer equ $ - offset buffer
 
 main proc
 
+	mov rax,offset main
+
     call set_exception_handlers
     invoke printf, CStr(<lf,"Mon64 loaded at %lX, rsp=%lX",lf>), rbx, rsp
 nextcmd:

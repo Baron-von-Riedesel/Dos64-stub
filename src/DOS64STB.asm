@@ -265,7 +265,13 @@ start16 proc
 imagetoolarge:
     @errorexit "image requires too much memory."
 @@:
-    add dx, 32      ;add space for IDT and page tables
+;--- add space for IDT and page tables
+;--- needed: 1 page  for IDT
+;---         1 page  for PML4 (1 PML4E, 512 GB)
+;---         1 page  for PDPT (64 PDPTEs, 64 * 1GB )
+;---        64 pages for PD (64 * 512 * PDEs, each 2MB )
+;--- total: 67 pages = 268 kB     
+    add dx, 268 + 3 ;extra 3 since we need to align to page boundary
     jc imagetoolarge
     mov ah,9
     call xmsaddr
@@ -372,10 +378,10 @@ nextpage:
     xor eax, eax
 nextreloc:
     @lodsw
-    test ah,0F0h
+    test ah,0F0h        ;must be < 1000h (size of a page)
     jz ignreloc
-    and ah,0Fh
-    add [eax+ebx], edx
+    and ah,0Fh			;usually it's type 0A (dir64)
+    add [eax+ebx], edx	;we adjust low32 only, since we cannot load beyond 4 GB
 ignreloc:
     cmp esi, ecx
     jb nextreloc
@@ -430,6 +436,8 @@ make_int_gates:
     lidt [IDTR]
 
     sub edi, 1000h
+
+;--- setup IRQ0, IRQ1 and Int21
 
     lea eax, [ebx+offset clock]
     mov es:[edi+(?MPIC+0)*16+0],ax ; set IRQ 0 handler
@@ -761,8 +769,10 @@ set_cursor proc
     MUL ecx
     MOVZX edx, BYTE PTR [ebp+esi*2+50h]   ;get cursor pos COL
     ADD eax, edx
-    mov ecx, eax
-    mov dx,3D4h
+    movzx ecx,word ptr [ebp+4eh]
+    shr ecx,1
+    add ecx, eax
+    mov dx,[ebp+63h]
     mov ah,ch
     mov al,0Eh
     out dx,ax
@@ -851,20 +861,6 @@ skipchar:
     pop rbp
     RET
 WriteChr endp
-
-WriteStr proc   ;write string in rsi
-    cld
-@@:
-    lodsb
-    and al,al
-    jz @F
-    mov dl,al
-    mov ah,2
-    int 21h
-    jmp @B
-@@:
-    ret
-WriteStr endp
 
 WriteStrX proc  ;write string at rip
     push rsi

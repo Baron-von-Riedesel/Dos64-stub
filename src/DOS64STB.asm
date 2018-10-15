@@ -36,10 +36,14 @@ endm
     db 67h
     lodsd
 endm
+@lgdt macro addr
+    db 66h
+    lgdt addr
+endm
 
 @wait macro
 local sm1
-    push eax
+;    push eax
 sm1:
     in al,64h       ;key from keyboard arrived?
     test al,1
@@ -47,7 +51,7 @@ sm1:
     in al,60h
     cmp al,81h      ;wait for ESC released
     jnz sm1
-    pop eax
+;    pop eax
 endm
 
 @errorexit macro text
@@ -71,27 +75,59 @@ endm
 
 ;--- 16bit start/exit code
 
+SEL_CODE64 equ 1*8
+SEL_CODE32 equ 2*8
+SEL_DATA32 equ 3*8
+SEL_FLAT   equ 4*8
+SEL_CODE16 equ 5*8
+SEL_DATA16 equ 6*8
+
 _TEXT16 segment use16 para public 'CODE'
 
     assume ds:_TEXT16
     assume es:_TEXT16
 
 GDTR label fword        ; Global Descriptors Table Register
-    dw 5*8-1            ; limit of GDT (size minus one)
+    dw 7*8-1            ; limit of GDT (size minus one)
     dd offset GDT       ; linear address of GDT
-IDTR label fword        ; Interrupt Descriptor Table Register
+IDTR label fword        ; IDTR in 64-bit mode
     dw 256*16-1         ; limit of IDT (size minus one)
     dd 0                ; linear address of IDT
+IDTR32 label fword      ; IDTR in 32-bit mode
+    dw 16*8-1           ; limit of IDT (size minus one)
+    dd offset IDT32
 nullidt label fword
     dw 3FFh
     dd 0
+llg label fword
+llgofs dd offset long_start
+    dw SEL_CODE64
   
     align 8
 GDT dq 0                    ; null descriptor
     dw 0FFFFh,0,9A00h,0AFh  ; 64-bit code descriptor
-    dw 0FFFFh,0,9A00h,000h  ; compatibility mode code descriptor
-    dw 0FFFFh,0,9200h,000h  ; compatibility mode data descriptor
-    dw 0FFFFh,0,9200h,08Fh  ; flat data descriptor
+    dw 0FFFFh,0,9A00h,040h  ; compatibility mode code descriptor
+    dw 0FFFFh,0,9200h,040h  ; compatibility mode data descriptor
+    dw 0FFFFh,0,9200h,0CFh  ; flat data descriptor
+    dw 0FFFFh,0,9A00h,0h    ; 16-bit, 64k code descriptor
+    dw 0FFFFh,0,9200h,0h    ; 16-bit, 64k data descriptor
+
+IDT32 dw offset exc3200+00,SEL_CODE32,8e00h,0
+      dw offset exc3200+04,SEL_CODE32,8e00h,0
+      dw offset exc3200+08,SEL_CODE32,8e00h,0
+      dw offset exc3200+12,SEL_CODE32,8e00h,0
+      dw offset exc3200+16,SEL_CODE32,8e00h,0
+      dw offset exc3200+20,SEL_CODE32,8e00h,0
+      dw offset exc3200+24,SEL_CODE32,8e00h,0
+      dw offset exc3200+28,SEL_CODE32,8e00h,0
+      dw offset exc3200+32,SEL_CODE32,8e00h,0
+      dw offset exc3200+36,SEL_CODE32,8e00h,0
+      dw offset exc3200+40,SEL_CODE32,8e00h,0
+      dw offset exc3200+44,SEL_CODE32,8e00h,0
+      dw offset exc3200+48,SEL_CODE32,8e00h,0
+      dw offset exc320D   ,SEL_CODE32,8e00h,0
+      dw offset exc3200+56,SEL_CODE32,8e00h,0
+      dw offset exc3200+60,SEL_CODE32,8e00h,0
 
 nthdr   IMAGE_NT_HEADERS <>
 sechdr  IMAGE_SECTION_HEADER <>
@@ -104,11 +140,7 @@ emm     EMM <>
 emm2    EMM <>
 xmshdl  dw -1
 fhandle dw -1
-
-SEL_CODE64 equ 1*8
-SEL_CODE16 equ 2*8
-SEL_DATA16 equ 3*8
-SEL_FLAT   equ 4*8
+stkbot  dw 0 
 
 ?MPIC equ 80h
 ?SPIC equ 88h
@@ -122,11 +154,19 @@ start16 proc
     movzx eax,ax
     shl eax,4
     add dword ptr [GDTR+2], eax ; convert offset to linear address
-    mov word ptr [GDT + SEL_CODE16 + 2], ax ;set base in code and data descriptor
-    mov word ptr [GDT + SEL_DATA16 + 2], ax
+    add dword ptr [IDTR32+2], eax
+    mov word ptr [GDT + SEL_DATA32 + 2], ax
+    mov word ptr [GDT + SEL_CODE16 + 2], ax
     shr eax,16
+    mov byte ptr [GDT + SEL_DATA32 + 4], al
     mov byte ptr [GDT + SEL_CODE16 + 4], al
-    mov byte ptr [GDT + SEL_DATA16 + 4], al
+
+    mov ax,_TEXT32
+    movzx eax,ax
+    shl eax,4
+    mov word ptr [GDT + SEL_CODE32 + 2], ax ;set base in code and data descriptor
+    shr eax,16
+    mov byte ptr [GDT + SEL_CODE32 + 4], al
 
     mov ax,ss
     mov dx,es
@@ -138,6 +178,7 @@ start16 proc
     int 21h         ; free unused memory
     push cs
     pop es
+
     mov ax,ss
     mov dx,cs
     sub ax,dx
@@ -146,6 +187,7 @@ start16 proc
     push ds
     pop ss
     mov sp,ax       ; make a TINY model, CS=SS=DS=ES
+    mov stkbot,sp
 
     smsw ax
     test al,1
@@ -339,18 +381,24 @@ imagetoolarge:
     mov fhandle,-1
 
     cli
-    lgdt [GDTR]
+    @lgdt [GDTR]        ; use 32-bit version of LGDT
 
     mov eax,cr0
     bts eax,0           ; enable pmode
     mov cr0,eax
 
-    db 66h, 0EAh
-    dd offset @F
-    dw SEL_CODE16
-@@:
-    mov ax,SEL_DATA16
+    db 0EAh             ; set CS to SEL_CODE32
+    dw offset pmode32
+    dw SEL_CODE32
+
+_TEXT32 segment use32 para public 'CODE'
+
+    assume es:FLAT
+
+pmode32:
+    mov ax,SEL_DATA32
     mov ss,ax
+    movzx esp,sp
     mov ds,ax
     mov ax,SEL_FLAT
     mov es,ax
@@ -366,18 +414,19 @@ imagetoolarge:
     push ds
     mov ax,SEL_FLAT
     mov ds,ax
+    assume ds:flat
 nextpage:
     cmp esi, ecx
     jnc reloc_done
     push ecx
-    @lodsd              ;get RVA of page
+    lodsd              ;get RVA of page
     mov ebx, eax
     add ebx, edi        ;convert RVA to linear address
-    @lodsd
+    lodsd
     lea ecx, [esi+eax-8];ecx=end of relocs for this page
     xor eax, eax
 nextreloc:
-    @lodsw
+    lodsw
     test ah,0F0h        ;must be < 1000h (size of a page)
     jz ignreloc
     and ah,0Fh			;usually it's type 0A (dir64)
@@ -389,12 +438,13 @@ ignreloc:
     jmp nextpage
 reloc_done:
     pop ds
+    assume ds:_TEXT16
 
 ;--- setup ebx/rbx with linear address of _TEXT
     mov bx,_TEXT
     movzx ebx,bx
     shl ebx,4
-    add [llg], ebx
+    add [llgofs], ebx
 
 ;--- create IDT
 
@@ -403,36 +453,37 @@ reloc_done:
     add edi,dword ptr nthdr.OptionalHeader.SizeOfStackReserve
     mov dword ptr [IDTR+2], edi
 
-    mov cx,32
+    mov ecx,32
     mov edx, offset exception
     add edx, ebx
 make_exc_gates:
     mov eax,edx
-    @stosw
+    stosw
     mov ax,SEL_CODE64
-    @stosw
+    stosw
     mov ax,8E00h
-    @stosd
+    stosd
     xor eax, eax
-    @stosd
-    @stosd
+    stosd
+    stosd
     add edx,4
     loop make_exc_gates
-    mov cx,256-32
-make_int_gates:
-    mov eax,offset interrupt
-    add eax, ebx
-    @stosw
-    mov ax,SEL_CODE64
-    @stosw
-    mov ax,8E00h        ;interrupt gate
-    @stosd
-    xor eax, eax
-    @stosd
-    @stosd
-    loop make_int_gates
+    mov ecx,128-32
+    mov edx,offset swint
+    mov si, 8F00h
+    call make_int_gates
+    mov cx,8
+    mov edx,offset Irq0007
+    mov si, 8E00h
+    call make_int_gates
+    mov cx,8
+    mov edx,offset Irq080F
+    call make_int_gates
+    mov cx,128-16
+    mov edx,offset swint
+    mov si, 8E00h
+    call make_int_gates
 
-    db 66h
     lidt [IDTR]
 
     sub edi, 1000h
@@ -465,7 +516,6 @@ make_int_gates:
     push edi
     mov ecx,02000h/4
     sub eax,eax
-    db 67h
     rep stosd       ; clear 2 pages (PML4 & PDPT)
     pop edi
 
@@ -535,8 +585,9 @@ next4gb:
     out 0A1h,al
 
     mov eax,cr4
-    bts eax,5
-    mov cr4,eax         ; enable physical-address extensions (PAE)
+    bts eax,5           ; enable physical-address extensions (PAE)
+    bts eax,9           ; also enable OSFXSR (no exception using SSE)
+    mov cr4,eax
 
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
@@ -559,11 +610,125 @@ next4gb:
     bts eax,31
     mov cr0,eax         ; enable paging
 
-    db 66h, 0EAh        ; jmp 0008:oooooooo
-llg dd offset long_start
-    dw SEL_CODE64
+    jmp [llg]
+
+make_int_gates proc
+    mov eax, edx
+    add eax, ebx
+    stosw
+    mov ax,SEL_CODE64
+    stosw
+    mov ax,si           ;int/trap gate
+    stosd
+    xor eax, eax
+    stosd
+    stosd
+    loop make_int_gates
+    ret
+make_int_gates endp
+
+_TEXT32 ends
 
 start16 endp
+
+_TEXT32 segment
+
+;--- exception handlers for 32-bit mode
+
+excno = 0
+exc3200:
+    repeat 32
+    push excno
+    jmp @F
+    excno = excno+1
+    endm
+@@:
+    hlt    ;interrupts are disabled, so just stop
+
+    assume ss:flat
+;--- exc 0d may occur if PAE paging cannot be enabled
+exc320D:
+    mov word ptr ss:[0B8000h],0720h
+newloop:
+    add byte ptr ss:[0B8000h],1
+    jmp newloop
+
+;--- leave 64-bit (compatibility) mode
+;--- disable paging, switch temporarily to PAE paging
+;--- then back again to 64-bit
+
+callv86 proc far
+
+    cli
+    mov ax,SEL_FLAT
+    mov ss,eax
+
+;--- disable paging
+    mov eax,cr0
+    btr eax,31
+    mov cr0, eax
+
+;--- disable long mode
+    mov ecx,0C0000080h  ; EFER MSR
+    rdmsr
+    btr eax,8
+    wrmsr
+
+;--- let CR3 point to PDPT
+    mov eax, cr3
+    add eax, 1000h
+    and byte ptr ss:[eax+00],01h   ;reset bits 1-7
+    and byte ptr ss:[eax+08],01h   ;of all 4 PDPTEs used for PAE paging
+    and byte ptr ss:[eax+16],01h
+    and byte ptr ss:[eax+24],01h 
+    mov cr3, eax
+
+;--- set IDT to 32-bit modus
+    mov ax,SEL_DATA32
+    mov ds,eax
+    lidt [IDTR32]
+
+;--- enable PAE paging
+    mov eax,cr0
+    bts eax,31
+    mov cr0, eax
+
+;--- disable paging
+    mov eax,cr0
+    btr eax,31
+    mov cr0, eax
+
+;--- let CR3 point to PML4 again
+    mov eax, cr3
+    or byte ptr ss:[eax+0], 6
+    or byte ptr ss:[eax+8], 6
+    or byte ptr ss:[eax+16], 6
+    or byte ptr ss:[eax+24], 6
+    sub eax, 1000h
+    mov cr3, eax
+
+;--- (re)enable long mode
+    mov ecx,0C0000080h  ; EFER MSR
+    rdmsr
+    bts eax,8           ; set long mode
+    wrmsr
+
+;--- (re)enable paging
+    mov eax,cr0
+    bts eax,31
+    mov cr0, eax
+
+;--- reset IDT to 64-bit modus
+    mov ax,SEL_DATA32
+    mov ds,eax
+    lidt [IDTR]
+
+    sti
+    mov al,8
+    retf
+callv86 endp
+_TEXT32 ends
+
 
 ;--- switch back to real-mode and exit
 
@@ -583,22 +748,21 @@ backtoreal proc
     btr eax,5           ; disable PAE paging
     mov cr4,eax
 
-    mov ax,SEL_DATA16   ; set SS,DS and ES to 64k data
-    mov ss,ax
+    mov ax,SEL_DATA16   ; set SS, DS and ES to 16bit, 64k data
     mov ds,ax
     mov es,ax
+    mov ss,ax
+    movzx esp,stkbot
 
     mov eax,cr0         ; switch to real mode
     btr eax, 0
     mov cr0,eax
-
-    db 0eah             ; clear instruction cache, CS=real-mode seg
-    dw $+4
+    db 0eah
+    dw @F
     dw _TEXT16
-
+@@:
     mov ax,STACK        ; SS=real-mode seg
     mov ss, ax
-    mov sp,4096
 
     push cs             ; DS=real-mode _TEXT16 seg
     pop ds
@@ -728,7 +892,6 @@ readsection proc
     ret
 readsection endp
 
-
 _TEXT16 ends
 
 ;--- here's the 64bit code segment.
@@ -744,7 +907,7 @@ _TEXT segment para use64 public 'CODE'
 
 bChar   db 0        ;keyboard "buffer"
 
-    assume ds:FLAT, es:FLAT
+    assume ds:FLAT, es:FLAT, ss:FLAT
 
 long_start proc
     mov esp,ecx
@@ -934,6 +1097,40 @@ excno = 0
     db " rip=",0
     mov rax,[rsp+8]
     call WriteQW
+    call WriteStrX
+    db 10,"[rsp]=",0
+    mov rax,[rsp+16]
+    call WriteQW
+    mov al,' '
+    call WriteChr
+    mov rax,[rsp+24]
+    call WriteQW
+    mov al,' '
+    call WriteChr
+    mov rax,[rsp+32]
+    call WriteQW
+    mov al,' '
+    call WriteChr
+    mov rax,[rsp+40]
+    call WriteQW
+    call WriteStrX
+    db 10,"      ",0
+    mov rax,[rsp+48]
+    call WriteQW
+    mov al,' '
+    call WriteChr
+    mov rax,[rsp+56]
+    call WriteQW
+    mov al,' '
+    call WriteChr
+    mov rax,[rsp+64]
+    call WriteQW
+    mov al,' '
+    call WriteChr
+    mov rax,[rsp+72]
+    call WriteQW
+    mov al,10
+    call WriteChr
     sti
     mov ax,4cffh
     int 21h
@@ -945,12 +1142,19 @@ clock:
     mov ebp,400h
     inc dword ptr [rbp+6Ch]
     pop rbp
-interrupt:              ; handler for all other interrupts
+Irq0007:
     push rax
+Irq0007_1:
     mov al,20h
     out 20h,al
     pop rax
+swint:
     iretq
+Irq080F:
+    push rax
+    mov al,20h
+    out 0A0h,al
+    jmp Irq0007_1
 
 keyboard:
     push rax
@@ -998,7 +1202,9 @@ int21 proc
     jz int21_02
     cmp ah,4Ch
     jz int21_4c
-    or byte ptr [rsp+2*8],1 ;set carry flat
+    cmp ah,30h
+    jz int21_30
+    or byte ptr [rsp+2*8],1 ;set carry flag
     iretq
 int21_01:
     call set_cursor
@@ -1044,14 +1250,22 @@ int21_02:
     iretq
 int21_4c:
     jmp [bv]
-bv  label fword
+bv  label ptr far32
     dd offset backtoreal
     dw SEL_CODE16
+int21_30:
+    mov ax,SEL_FLAT ;call to compatibility mode requires a valid SS
+    mov ss,ax
+    call [v86]
+    iretq
+v86 label ptr far32
+    dd offset callv86
+    dw SEL_CODE32
 int21 endp
 
 _TEXT ends
 
-;--- 4k stack, used in both modes
+;--- 5k stack, used in 16-bit modes
 
 STACK segment use16 para stack 'STACK'
     db 5120 dup (?)

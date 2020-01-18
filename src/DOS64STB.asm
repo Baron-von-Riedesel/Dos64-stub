@@ -1200,6 +1200,8 @@ int21 proc
     jz int21_01
     cmp ah,02h
     jz int21_02
+    cmp ah,0Bh
+    jz int21_0b
     cmp ah,4Ch
     jz int21_4c
     cmp ah,30h
@@ -1247,6 +1249,18 @@ nextkey:
 int21_02:
     mov al,dl
     call WriteChr
+    iretq
+int21_0b:
+    push rbx
+    mov bx,_TEXT
+    movzx ebx,bx
+    shl ebx,4
+    mov al,[ebx+offset bChar]
+    cmp al,0
+    jz @F
+    mov al,0FFh
+@@:
+    pop rbx
     iretq
 int21_4c:
     jmp [bv]

@@ -949,6 +949,36 @@ set_cursor proc
     ret
 set_cursor endp
 
+read_char proc
+    push rbx
+    push rsi
+    mov bx,_TEXT
+    movzx ebx,bx
+    shl ebx,4
+nochar:
+    cmp byte ptr [ebx+ offset bChar],0
+    jnz @F
+    hlt
+    jmp nochar
+@@:
+    mov al,[ebx+ offset bChar]
+    mov byte ptr [ebx+offset bChar],0
+;--- check if the key is a 'known' one (alphanumeric or Enter)
+    mov rsi,0
+nextkey:
+    cmp al,[rbx+rsi+offset keycodes]
+    jz @F
+    inc rsi
+    cmp rsi,lkeycodes
+    jnz nextkey
+    jmp nochar
+@@:
+    mov al,[rbx+rsi+offset chars]
+    pop rsi
+    pop rbx
+    ret
+read_char endp
+
 ;--- scroll screen up one line
 ;--- rsi = linear address start of last line
 ;--- rbp = linear address of BIOS area (0x400)
@@ -1200,6 +1230,8 @@ int21 proc
     jz int21_01
     cmp ah,02h
     jz int21_02
+    cmp ah,08h
+    jz int21_08
     cmp ah,0Bh
     jz int21_0b
     cmp ah,4Ch
@@ -1210,32 +1242,7 @@ int21 proc
     iretq
 int21_01:
     call set_cursor
-    push rbx
-    mov bx,_TEXT
-    movzx ebx,bx
-    shl ebx,4
-nochar:
-    cmp byte ptr [ebx+ offset bChar],0
-    jnz @F
-    hlt
-    jmp nochar
-@@:
-    mov al,[ebx+ offset bChar]
-    mov byte ptr [ebx+offset bChar],0
-;--- check if the key is a 'known' one (alphanumeric or Enter)
-    push rsi
-    mov rsi,0
-nextkey:
-    cmp al,[rbx+rsi+offset keycodes]
-    jz @F
-    inc rsi
-    cmp rsi,lkeycodes
-    jnz nextkey
-    pop rsi
-    pop rbx
-    jmp int21_01
-@@:
-    mov al,[rbx+rsi+offset chars]
+    call read_char
     push rax
     cmp al,0dh
     jnz @F
@@ -1243,12 +1250,13 @@ nextkey:
 @@:
     call WriteChr
     pop rax
-    pop rsi
-    pop rbx
     iretq
 int21_02:
     mov al,dl
     call WriteChr
+    iretq
+int21_08:
+    call read_char
     iretq
 int21_0b:
     push rbx

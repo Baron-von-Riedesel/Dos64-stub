@@ -222,13 +222,13 @@ start16 proc
     int 21h
     mov es,bx
     mov es,es:[002Ch]
-    xor di,di
-    xor al,al
+    mov di,1
+    xor ax,ax
 @@:
-    repnz scasb
-    cmp byte ptr es:[di],0
-    jnz @B
-    add di,3
+    dec di
+    scasw
+    jne @B
+    add di,2
     mov word ptr fname+0,di
     mov word ptr fname+2,es
     pop es

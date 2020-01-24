@@ -221,9 +221,10 @@ start16 proc
     mov ah,51h
     int 21h
     mov es,bx
-    mov es,es:[002Ch]
+    mov es,es:[002Ch]	;get the name of the executable (behind ENV block)
     xor di,di
     xor al,al
+	mov cx,-1		;<-added 24.1.2020
 @@:
     repnz scasb
     cmp byte ptr es:[di],0
@@ -234,7 +235,7 @@ start16 proc
     pop es
     push ds
     lds dx,fname
-    mov ax,3D00h
+    mov ax,3D00h		;open the executable
     int 21h
     pop ds
     jnc @F

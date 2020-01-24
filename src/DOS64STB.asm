@@ -224,12 +224,12 @@ start16 proc
     mov es,es:[002Ch]	;get the name of the executable (behind ENV block)
     xor di,di
     xor al,al
-	mov cx,-1		;<-added 24.1.2020
+    mov cx,-1       ;<-added 24.1.2020
 @@:
-    dec di
-    scasw
+    repnz scasb
+    cmp byte ptr es:[di],0
     jne @B
-    add di,2
+    add di,3
     mov word ptr fname+0,di
     mov word ptr fname+2,es
     pop es

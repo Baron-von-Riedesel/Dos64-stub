@@ -226,10 +226,10 @@ start16 proc
     xor al,al
 	mov cx,-1		;<-added 24.1.2020
 @@:
-    repnz scasb
-    cmp byte ptr es:[di],0
-    jnz @B
-    add di,3
+    dec di
+    scasw
+    jne @B
+    add di,2
     mov word ptr fname+0,di
     mov word ptr fname+2,es
     pop es

@@ -1,0 +1,6 @@
+
+   26.1.2020:
+   - removed 32-bit segment, jump directly from 16-bit to 64-bit.
+   - reprogram master pic only, IRQ0-7 mapped at INT 78-7Fh.
+   - implemented DPMI function 0x300 (simulate real-mode interrupt);
+     this function is used by the int 21h emulation.

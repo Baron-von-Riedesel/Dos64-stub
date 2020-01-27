@@ -13,11 +13,9 @@
    - setup GDT and switch to protected-mode
    - handle relocation info ( the image MUST contain base relocations )
    - setup IDT and page tables for 64-bit PAE paging
-   - install a small "OS" (int 21h) that allows the image to
-     + display a character onto the screen
-     + read a character from keyboard
-     + terminate and return to DOS
-   - reprogram PICs, so IRQs 00h-0Fh are mapped to Int 80h-8Fh
+   - install a small "OS" (int 21h/31h) that allows the image to call
+     real-mode DOS functions that don't need pointer translation.
+   - reprogram master PIC, so IRQs 00h-07h are mapped to Int 78h-7fh
    - enable paging; call the entry point of the loaded 64-bit image
 
 
@@ -42,8 +40,8 @@
    - base of image must be < 4 GB
   
   There's a sample, Mon64.asm, supplied, that allows to display
-  a few 64-bit resources. It also shows how the Int21-"API" installed
-  by dos64stb is supposed to be used.
+  a few 64-bit resources. It also shows how the Int21 emulation
+  installed by dos64stb is supposed to be used.
 
   Note that when jwasm is used to assemble a 64-bit binary, it may
   emit a warning that an underscore is needed for the start label.

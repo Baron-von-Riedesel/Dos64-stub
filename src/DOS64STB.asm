@@ -9,8 +9,13 @@
     option casemap:none
 
     include peimage.inc
+    include dpmi.inc
 
     option MZ:sizeof IMAGE_DOS_HEADER   ;set min size of MZ header if jwasm's -mz option is used
+
+?MPIC equ 78h
+?SPIC equ 70h	; isn't changed
+?IDT32 equ 0	;1=setup a IDT in legacy protected-mode (needed if an exc occurs there)
 
 EMM struct  ;XMS block move help struct
 _size  dd ?
@@ -36,22 +41,34 @@ endm
     db 67h
     lodsd
 endm
+@movsw macro
+    db 67h
+    movsw
+endm
+@rep macro cmd
+    db 0f3h,67h
+    cmd
+endm
 @lgdt macro addr
     db 66h
     lgdt addr
 endm
+@lidt macro addr
+    db 66h
+    lidt addr
+endm
 
 @wait macro
-local sm1
-;    push eax
-sm1:
+local lbl1
+;    push ax
+lbl1:
     in al,64h       ;key from keyboard arrived?
     test al,1
-    jz sm1
+    jz lbl1
     in al,60h
     cmp al,81h      ;wait for ESC released
-    jnz sm1
-;    pop eax
+    jnz lbl1
+;    pop ax
 endm
 
 @errorexit macro text
@@ -76,11 +93,9 @@ endm
 ;--- 16bit start/exit code
 
 SEL_CODE64 equ 1*8
-SEL_CODE32 equ 2*8
-SEL_DATA32 equ 3*8
-SEL_FLAT   equ 4*8
-SEL_CODE16 equ 5*8
-SEL_DATA16 equ 6*8
+SEL_FLAT   equ 2*8
+SEL_CODE16 equ 3*8
+SEL_DATA16 equ 4*8
 
 _TEXT16 segment use16 para public 'CODE'
 
@@ -88,14 +103,16 @@ _TEXT16 segment use16 para public 'CODE'
     assume es:_TEXT16
 
 GDTR label fword        ; Global Descriptors Table Register
-    dw 7*8-1            ; limit of GDT (size minus one)
+    dw 5*8-1            ; limit of GDT (size minus one)
     dd offset GDT       ; linear address of GDT
-IDTR label fword        ; IDTR in 64-bit mode
+IDTR label fword        ; IDTR in long mode
     dw 256*16-1         ; limit of IDT (size minus one)
     dd 0                ; linear address of IDT
-IDTR32 label fword      ; IDTR in 32-bit mode
-    dw 16*8-1           ; limit of IDT (size minus one)
+if ?IDT32
+IDTR32 label fword      ; IDTR in legacy mode
+    dw 18*8-1           ; limit of IDT (size minus one)
     dd offset IDT32
+endif
 nullidt label fword
     dw 3FFh
     dd 0
@@ -106,44 +123,59 @@ llgofs dd offset long_start
     align 8
 GDT dq 0                    ; null descriptor
     dw 0FFFFh,0,9A00h,0AFh  ; 64-bit code descriptor
-    dw 0FFFFh,0,9A00h,040h  ; compatibility mode code descriptor
-    dw 0FFFFh,0,9200h,040h  ; compatibility mode data descriptor
-    dw 0FFFFh,0,9200h,0CFh  ; flat data descriptor
+    dw 0FFFFh,0,9200h,0CFh  ; 32-bit flat data descriptor
     dw 0FFFFh,0,9A00h,0h    ; 16-bit, 64k code descriptor
     dw 0FFFFh,0,9200h,0h    ; 16-bit, 64k data descriptor
 
-IDT32 dw offset exc3200+00,SEL_CODE32,8e00h,0
-      dw offset exc3200+04,SEL_CODE32,8e00h,0
-      dw offset exc3200+08,SEL_CODE32,8e00h,0
-      dw offset exc3200+12,SEL_CODE32,8e00h,0
-      dw offset exc3200+16,SEL_CODE32,8e00h,0
-      dw offset exc3200+20,SEL_CODE32,8e00h,0
-      dw offset exc3200+24,SEL_CODE32,8e00h,0
-      dw offset exc3200+28,SEL_CODE32,8e00h,0
-      dw offset exc3200+32,SEL_CODE32,8e00h,0
-      dw offset exc3200+36,SEL_CODE32,8e00h,0
-      dw offset exc3200+40,SEL_CODE32,8e00h,0
-      dw offset exc3200+44,SEL_CODE32,8e00h,0
-      dw offset exc3200+48,SEL_CODE32,8e00h,0
-      dw offset exc320D   ,SEL_CODE32,8e00h,0
-      dw offset exc3200+56,SEL_CODE32,8e00h,0
-      dw offset exc3200+60,SEL_CODE32,8e00h,0
+if ?IDT32
+IDT32 label qword
+      dw offset exc3200+00,SEL_CODE16,8e00h,0	;00
+      dw offset exc3200+04,SEL_CODE16,8e00h,0	;01
+      dw offset exc3200+08,SEL_CODE16,8e00h,0	;02
+      dw offset exc3200+12,SEL_CODE16,8e00h,0	;03
+      dw offset exc3200+16,SEL_CODE16,8e00h,0	;04
+      dw offset exc3200+20,SEL_CODE16,8e00h,0	;05
+      dw offset exc3200+24,SEL_CODE16,8e00h,0	;06
+      dw offset exc3200+28,SEL_CODE16,8e00h,0	;07
+      dw offset exc3200+32,SEL_CODE16,8e00h,0	;08
+      dw offset exc3200+36,SEL_CODE16,8e00h,0	;09
+      dw offset exc3200+40,SEL_CODE16,8e00h,0	;0A
+      dw offset exc3200+44,SEL_CODE16,8e00h,0	;0B
+      dw offset exc3200+48,SEL_CODE16,8e00h,0	;0C
+      dw offset exc3200+52,SEL_CODE16,8e00h,0	;0D
+      dw offset exc3200+56,SEL_CODE16,8e00h,0	;0E
+      dw offset exc3200+60,SEL_CODE16,8e00h,0	;0F
+      dw offset exc3200+64,SEL_CODE16,8e00h,0	;10
+      dw offset exc3200+68,SEL_CODE16,8e00h,0	;11
+endif
+
+savedint6x label dword
+    dw offset jmpirq0,_TEXT16
+    dw offset jmpirq1,_TEXT16
+    dw offset jmpirq2,_TEXT16
+    dw offset jmpirq3,_TEXT16
+    dw offset jmpirq4,_TEXT16
+    dw offset jmpirq5,_TEXT16
+    dw offset jmpirq6,_TEXT16
+    dw offset jmpirq7,_TEXT16
+storedIRQ0_7 label dword
+    dd 8 dup (?)
 
 nthdr   IMAGE_NT_HEADERS <>
 sechdr  IMAGE_SECTION_HEADER <>
 xmsaddr dd 0
 PhysAdr dd 0    ;physical address of allocated EMB
 ImgBase dd 0
-adjust  dd 0
+adjust  dd 0	;
 fname   dd 0
+dwSavedESP dd 0
+        dw SEL_FLAT
 emm     EMM <>
 emm2    EMM <>
 xmshdl  dw -1
 fhandle dw -1
 stkbot  dw 0 
-
-?MPIC equ 80h
-?SPIC equ 88h
+        dw _TEXT16
 
 wPICMask dw 0   ; variable to save/restore PIC masks
 
@@ -154,19 +186,14 @@ start16 proc
     movzx eax,ax
     shl eax,4
     add dword ptr [GDTR+2], eax ; convert offset to linear address
+if ?IDT32
     add dword ptr [IDTR32+2], eax
-    mov word ptr [GDT + SEL_DATA32 + 2], ax
+endif
+    mov word ptr [GDT + SEL_DATA16 + 2], ax
     mov word ptr [GDT + SEL_CODE16 + 2], ax
     shr eax,16
-    mov byte ptr [GDT + SEL_DATA32 + 4], al
+    mov byte ptr [GDT + SEL_DATA16 + 4], al
     mov byte ptr [GDT + SEL_CODE16 + 4], al
-
-    mov ax,_TEXT32
-    movzx eax,ax
-    shl eax,4
-    mov word ptr [GDT + SEL_CODE32 + 2], ax ;set base in code and data descriptor
-    shr eax,16
-    mov byte ptr [GDT + SEL_CODE32 + 4], al
 
     mov ax,ss
     mov dx,es
@@ -221,21 +248,21 @@ start16 proc
     mov ah,51h
     int 21h
     mov es,bx
-    mov es,es:[002Ch]	;get the name of the executable (behind ENV block)
+    mov es,es:[002Ch]
     xor di,di
     xor al,al
-    mov cx,-1       ;<-added 24.1.2020
+    mov cx,-1
 @@:
     repnz scasb
     cmp byte ptr es:[di],0
-    jne @B
+    jnz @B
     add di,3
     mov word ptr fname+0,di
     mov word ptr fname+2,es
     pop es
     push ds
     lds dx,fname
-    mov ax,3D00h		;open the executable
+    mov ax,3D00h
     int 21h
     pop ds
     jnc @F
@@ -388,21 +415,16 @@ imagetoolarge:
     bts eax,0           ; enable pmode
     mov cr0,eax
 
-    db 0EAh             ; set CS to SEL_CODE32
-    dw offset pmode32
-    dw SEL_CODE32
-
-_TEXT32 segment use32 para public 'CODE'
-
-    assume es:FLAT
-
-pmode32:
-    mov ax,SEL_DATA32
+    mov ax,SEL_DATA16
     mov ss,ax
     movzx esp,sp
     mov ds,ax
     mov ax,SEL_FLAT
     mov es,ax
+    db 0eah
+    dw offset @F
+    dw SEL_CODE16
+@@:
 
 ;--- handle base relocations
     mov edi, ImgBase
@@ -413,21 +435,21 @@ pmode32:
     add esi, edi    ;RVA->linear
     add ecx, esi    ;ecx=end of relocs (linear)
     push ds
-    mov ax,SEL_FLAT
+    mov ax,es
     mov ds,ax
     assume ds:flat
 nextpage:
     cmp esi, ecx
     jnc reloc_done
     push ecx
-    lodsd              ;get RVA of page
+    @lodsd              ;get RVA of page
     mov ebx, eax
     add ebx, edi        ;convert RVA to linear address
-    lodsd
+    @lodsd
     lea ecx, [esi+eax-8];ecx=end of relocs for this page
     xor eax, eax
 nextreloc:
-    lodsw
+    @lodsw
     test ah,0F0h        ;must be < 1000h (size of a page)
     jz ignreloc
     and ah,0Fh			;usually it's type 0A (dir64)
@@ -447,11 +469,218 @@ reloc_done:
     shl ebx,4
     add [llgofs], ebx
 
-;--- create IDT
-
     mov edi,ImgBase
     add edi,nthdr.OptionalHeader.SizeOfImage
     add edi,dword ptr nthdr.OptionalHeader.SizeOfStackReserve
+
+    call createIDT
+    call createPgTabs
+    call setpic
+
+    mov eax,cr4
+    bts eax,5           ; enable physical-address extensions (PAE)
+    bts eax,9           ; also enable OSFXSR (no exception using SSE)
+    mov cr4,eax
+
+    mov ecx,0C0000080h  ; EFER MSR
+    rdmsr
+    bts eax,8           ; enable long mode
+    wrmsr
+
+;--- long_start expects:
+;--- ecx = value of ESP in 64-bit
+;--- esi = value of EIP in 64-bit
+;--- ebx = image start
+
+    mov ebx,ImgBase
+    mov esi,nthdr.OptionalHeader.AddressOfEntryPoint
+    add esi,ebx
+    mov ecx,dword ptr nthdr.OptionalHeader.SizeOfStackReserve
+    add ecx,nthdr.OptionalHeader.SizeOfImage
+    add ecx,ebx
+
+    mov eax,cr0
+    bts eax,31
+    mov cr0,eax         ; enable paging
+
+    jmp [llg]
+
+start16 endp
+
+make_int_gates proc
+    mov eax, edx
+    add eax, ebx
+    @stosw
+    mov ax,SEL_CODE64
+    @stosw
+    mov ax,si           ;int/trap gate
+    @stosd
+    xor eax, eax
+    @stosd
+    @stosd
+    loop make_int_gates
+    ret
+make_int_gates endp
+
+if ?IDT32
+;--- exception handlers for legacy protected-mode
+
+    assume ss:flat
+
+excno = 0
+exc3200:
+    repeat 16+2
+    push excno
+    jmp @F
+    excno = excno+1
+    endm
+@@:
+    mov dword ptr ss:[0B8000h],17201720h
+    pop eax
+    mov ah,al
+    shr ah,4
+    and ax,0F0Fh
+    or  ax,3030h
+    cmp al,3Ah
+    jb @F
+    add al,7
+@@:
+    mov ss:[0b8000h],ah
+    mov ss:[0b8002h],al
+    hlt    ;interrupts are disabled, so just stop
+endif
+
+;--- call real-mode thru DPMI function ax=0x300, bl=intno, edi=RMCS
+
+call_rmode proc
+
+    cli
+    pushad
+    mov ax,SEL_DATA16
+    mov es,ax
+    mov es:dwSavedESP,esp
+    mov ss,ax
+    movzx esp,ss:stkbot
+    sub sp,sizeof RMCS
+    mov ax, SEL_FLAT
+    mov ds, ax
+    push ss
+    pop es
+    cld
+    mov esi,edi
+    mov edi,esp
+    mov ecx,(sizeof RMCS)/2
+    @rep movsw
+
+    shl bx,2
+    mov eax,ds:[bx]
+    mov dword ptr [esp].RMCS.regIP, eax
+    cmp dword ptr [esp].RMCS.regSP,0
+    jnz @F
+    mov [esp].RMCS.regSP,sp
+    mov [esp].RMCS.rSS,_TEXT16
+@@:
+
+;--- disable paging
+    mov eax,cr0
+    btr eax,31
+    mov cr0, eax
+
+;--- disable long mode
+    mov ecx,0C0000080h  ; EFER MSR
+    rdmsr
+    btr eax,8
+    wrmsr
+
+    mov ax,SEL_DATA16   ; set DS and ES to 16bit, 64k data
+    mov es,ax
+    mov ds,ax
+
+;--- switch to real-mode, then back to prot-mode
+
+    mov eax,cr0
+    and al,0feh
+    mov cr0,eax
+    jmp far16 ptr @F	; set CS to a real-mode segm
+@@:
+    mov ax, cs          ; SS=real-mode seg
+    mov ss, ax
+    @lidt cs:[nullidt]  ; IDTR=real-mode compatible values
+    and byte ptr [esp].RMCS.rFlags+1,08Eh   ;reset IOPL, NT, TF
+    popad
+    popf
+    pop es
+    pop ds
+    pop fs
+    pop gs
+    pop dword ptr cs:[adjust]	;use this field temporarily
+    lss sp,ss:[esp]
+    pushf
+    cli
+    push cs
+    push offset backtopm
+    jmp dword ptr cs:[adjust]
+backtopm:
+    lss sp,dword ptr cs:[stkbot]
+    push gs
+    push fs
+    push ds
+    push es
+    pushf
+    cli
+    @lgdt cs:[GDTR]     ; use 32-bit version of LGDT
+    pushad
+
+    pushf
+    and byte ptr [esp+1],8Eh	;reset NT,IOPL,TF
+    popf
+
+    mov eax,cr0
+    or al,1
+    mov cr0,eax
+    mov ax,SEL_DATA16
+    mov ss,ax
+    mov ds,ax
+    mov ax,SEL_FLAT
+    mov es,ax
+if 0
+    db 0eah
+    dw offset @F
+    dw SEL_CODE16
+@@:
+endif
+    @lidt [IDTR]
+;--- (re)enable long mode
+    mov ecx,0C0000080h  ; EFER MSR
+    rdmsr
+    bts eax,8           ; set long mode
+    wrmsr
+
+;--- (re)enable paging
+    mov eax,cr0
+    bts eax,31
+    mov cr0, eax
+
+    mov edi,dwSavedESP	;restore EDI
+    mov edi,es:[edi]
+    movzx esi,sp
+    mov ecx,8+2
+    cld
+    @rep movsd
+    @movsw
+    lss esp, fword ptr dwSavedESP
+    popad
+    sti
+
+    db 66h
+    retf
+call_rmode endp
+
+;--- create IDT for long mode
+;--- EDI->free memory
+;--- ES=FLAT
+
+createIDT proc
     mov dword ptr [IDTR+2], edi
 
     mov ecx,32
@@ -459,57 +688,68 @@ reloc_done:
     add edx, ebx
 make_exc_gates:
     mov eax,edx
-    stosw
+    @stosw
     mov ax,SEL_CODE64
-    stosw
+    @stosw
     mov ax,8E00h
-    stosd
+    @stosd
     xor eax, eax
-    stosd
-    stosd
+    @stosd
+    @stosd
     add edx,4
     loop make_exc_gates
-    mov ecx,128-32
+    mov ecx,256-32
     mov edx,offset swint
     mov si, 8F00h
     call make_int_gates
+
+    push edi
+    lea edi,[edi-1000h]
+    push edi
+    lea edi,[edi+?MPIC*16]
     mov cx,8
     mov edx,offset Irq0007
     mov si, 8E00h
     call make_int_gates
+    pop edi
+    lea edi,[edi+?SPIC*16]
     mov cx,8
     mov edx,offset Irq080F
     call make_int_gates
-    mov cx,128-16
-    mov edx,offset swint
-    mov si, 8E00h
-    call make_int_gates
+    pop edi
 
-    lidt [IDTR]
+    @lidt [IDTR]
 
     sub edi, 1000h
 
-;--- setup IRQ0, IRQ1 and Int21
+;--- setup IRQ0, Int21, Int31
 
     lea eax, [ebx+offset clock]
     mov es:[edi+(?MPIC+0)*16+0],ax ; set IRQ 0 handler
     shr eax,16
     mov es:[edi+(?MPIC+0)*16+6],ax
 
-    lea eax, [ebx+offset keyboard]
-    mov es:[edi+(?MPIC+1)*16+0],ax ; set IRQ 1 handler
-    shr eax,16
-    mov es:[edi+(?MPIC+1)*16+6],ax
-
     lea eax,[ebx+offset int21]
     mov es:[edi+21h*16+0],ax ; set int 21h handler
-    mov word ptr es:[edi+21h*16+4],8F00h    ;change to trap gate
+;    mov word ptr es:[edi+21h*16+4],8F00h    ;change to trap gate
     shr eax,16
     mov es:[edi+21h*16+6],ax
 
-;--- setup page directories and tables
+    lea eax,[ebx+offset int31]
+    mov es:[edi+31h*16+0],ax ; set int 31h handler
+    shr eax,16
+    mov es:[edi+31h*16+6],ax
 
     add edi, 1000h
+    ret
+createIDT endp
+
+;--- setup page directories and tables
+;--- EDI -> free memory
+;--- ES=FLAT
+
+createPgTabs proc
+
     add edi, 0fffh  ;align to page boundary
     and di,0f000h
     mov cr3, edi    ; load page-map level-4 base
@@ -517,7 +757,7 @@ make_exc_gates:
     push edi
     mov ecx,02000h/4
     sub eax,eax
-    rep stosd       ; clear 2 pages (PML4 & PDPT)
+    @rep stosd       ; clear 2 pages (PML4 & PDPT)
     pop edi
 
 ;--- DI+0    : PML4
@@ -556,185 +796,146 @@ next4gb:
     inc esi
     dec dl
     jnz next4gb
+    ret
+createPgTabs endp
+
+;--- DS=_TEXT16,ES=FLAT
+
+storeirq07 proc
+    mov cx,8
+    mov bx,8*4
+    mov di,offset storedIRQ0_7
+nextitem:
+    mov eax, es:[bx]
+    mov [di], eax
+    add bx,4
+    add di,4
+    loop nextitem
+    ret
+storeirq07 endp
+
+;--- init the real-mode interrupts that are
+;--- used for IRQs in long mode. This avoids
+;--- having to restore them each time we temp. switch
+;--- to real-mode.
+;--- DS=_TEXT16,ES=FLAT
+
+setintxxvecs proc
+    mov cx,8
+    mov bx,4*?MPIC
+    mov di,offset savedint6x
+nextitem:
+    mov eax, [di]
+    xchg eax, es:[bx]
+    mov [di], eax
+    add bx,4
+    add di,4
+    loop nextitem
+    ret
+setintxxvecs endp
+
+;--- jmp to the IRQ handlers in real-mode
+jmpirq0:jmp cs:[storedIRQ0_7+00]
+jmpirq1:jmp cs:[storedIRQ0_7+04]
+jmpirq2:jmp cs:[storedIRQ0_7+08]
+jmpirq3:jmp cs:[storedIRQ0_7+12]
+jmpirq4:jmp cs:[storedIRQ0_7+16]
+jmpirq5:jmp cs:[storedIRQ0_7+20]
+jmpirq6:jmp cs:[storedIRQ0_7+24]
+jmpirq7:jmp cs:[storedIRQ0_7+28]
 
 ;--- reprogram PIC: change IRQ 0-7 to INT 80h-87h, IRQ 8-15 to INT 88h-8Fh
+;--- ES=FLAT
+
+setpic proc
 
     in al,0A1h
     mov ah,al
     in al,21h
     mov [wPICMask],ax
+
+    call storeirq07
+    call setintxxvecs
+
+if ?MPIC ne 8
     mov al,10001b       ; begin PIC 1 initialization
     out 20h,al
-    mov al,10001b       ; begin PIC 2 initialization
-    out 0A0h,al
     mov al,?MPIC        ; IRQ 0-7: interrupts 80h-87h
     out 21h,al
-    mov al,?SPIC        ; IRQ 8-15: interrupts 88h-8Fh
-    out 0A1h,al
     mov al,100b         ; slave connected to IRQ2
     out 21h,al
-    mov al,2
-    out 0A1h,al
     mov al,1            ; Intel environment, manual EOI
     out 21h,al
-    out 0A1h,al
     in al,21h
-    mov al,11111100b    ; enable only clock and keyboard IRQ
-    out 21h,al
+endif
+if ?SPIC ne 70h
+    mov al,10001b       ; begin PIC 2 initialization
+    out 0A0h,al
+    mov al,?SPIC        ; IRQ 8-15: interrupts 88h-8Fh
+    out 0A1h,al
+    mov al,2
+    out 0A1h,al
     in al,0A1h
-    mov al,11111111b
+endif
+    mov ax,[wPICMask]
+if ?MPIC ne 8
+;    mov al,11111100b    ; enable only clock IRQ
+    out 21h,al
+endif
+if ?SPIC ne 70h
+;    mov al,11111111b
+    mov al,ah
+    out 0A1h,al
+endif
+    ret
+setpic endp
+
+;--- reprogram PIC: change IRQ 0-7 to INT 08h-0Fh
+;--- ES=FLAT
+;--- DS=_TEXT16
+
+resetpic proc 
+
+    mov al,10001b       ; begin PIC 1 initialization
+    out 20h,al
+;    mov al,10001b       ; begin PIC 2 initialization
+;    out 0A0h,al
+    mov al,08h          ; IRQ 0-7: back to ints 8h-Fh
+    out 21h,al
+;    mov al,70h          ; IRQ 8-15: back to ints 70h-77h
+;    out 0A1h,al
+    mov al,100b         ; slave connected to IRQ2
+    out 21h,al
+;   mov al,2
+;    out 0A1h,al
+    mov al,1            ; Intel environment, manual EOI
+    out 21h,al
+;    out 0A1h,al
+
+    in al,21h
+    mov ax,[wPICMask]   ; restore PIC masks
+    out 21h,al
+    mov al,ah
     out 0A1h,al
 
-    mov eax,cr4
-    bts eax,5           ; enable physical-address extensions (PAE)
-    bts eax,9           ; also enable OSFXSR (no exception using SSE)
-    mov cr4,eax
+    call setintxxvecs
 
-    mov ecx,0C0000080h  ; EFER MSR
-    rdmsr
-    bts eax,8           ; enable long mode
-    wrmsr
-
-;--- long_start expects:
-;--- ecx = value of ESP in 64-bit
-;--- esi = value of EIP in 64-bit
-;--- ebx = image start
-
-    mov ebx,ImgBase
-    mov esi,nthdr.OptionalHeader.AddressOfEntryPoint
-    add esi,ebx
-    mov ecx,dword ptr nthdr.OptionalHeader.SizeOfStackReserve
-    add ecx,nthdr.OptionalHeader.SizeOfImage
-    add ecx,ebx
-
-    mov eax,cr0
-    bts eax,31
-    mov cr0,eax         ; enable paging
-
-    jmp [llg]
-
-make_int_gates proc
-    mov eax, edx
-    add eax, ebx
-    stosw
-    mov ax,SEL_CODE64
-    stosw
-    mov ax,si           ;int/trap gate
-    stosd
-    xor eax, eax
-    stosd
-    stosd
-    loop make_int_gates
     ret
-make_int_gates endp
-
-_TEXT32 ends
-
-start16 endp
-
-_TEXT32 segment
-
-;--- exception handlers for 32-bit mode
-
-excno = 0
-exc3200:
-    repeat 32
-    push excno
-    jmp @F
-    excno = excno+1
-    endm
-@@:
-    hlt    ;interrupts are disabled, so just stop
-
-    assume ss:flat
-;--- exc 0d may occur if PAE paging cannot be enabled
-exc320D:
-    mov word ptr ss:[0B8000h],0720h
-newloop:
-    add byte ptr ss:[0B8000h],1
-    jmp newloop
-
-;--- leave 64-bit (compatibility) mode
-;--- disable paging, switch temporarily to PAE paging
-;--- then back again to 64-bit
-
-callv86 proc far
-
-    cli
-    mov ax,SEL_FLAT
-    mov ss,eax
-
-;--- disable paging
-    mov eax,cr0
-    btr eax,31
-    mov cr0, eax
-
-;--- disable long mode
-    mov ecx,0C0000080h  ; EFER MSR
-    rdmsr
-    btr eax,8
-    wrmsr
-
-;--- let CR3 point to PDPT
-    mov eax, cr3
-    add eax, 1000h
-    and byte ptr ss:[eax+00],01h   ;reset bits 1-7
-    and byte ptr ss:[eax+08],01h   ;of all 4 PDPTEs used for PAE paging
-    and byte ptr ss:[eax+16],01h
-    and byte ptr ss:[eax+24],01h 
-    mov cr3, eax
-
-;--- set IDT to 32-bit modus
-    mov ax,SEL_DATA32
-    mov ds,eax
-    lidt [IDTR32]
-
-;--- enable PAE paging
-    mov eax,cr0
-    bts eax,31
-    mov cr0, eax
-
-;--- disable paging
-    mov eax,cr0
-    btr eax,31
-    mov cr0, eax
-
-;--- let CR3 point to PML4 again
-    mov eax, cr3
-    or byte ptr ss:[eax+0], 6
-    or byte ptr ss:[eax+8], 6
-    or byte ptr ss:[eax+16], 6
-    or byte ptr ss:[eax+24], 6
-    sub eax, 1000h
-    mov cr3, eax
-
-;--- (re)enable long mode
-    mov ecx,0C0000080h  ; EFER MSR
-    rdmsr
-    bts eax,8           ; set long mode
-    wrmsr
-
-;--- (re)enable paging
-    mov eax,cr0
-    bts eax,31
-    mov cr0, eax
-
-;--- reset IDT to 64-bit modus
-    mov ax,SEL_DATA32
-    mov ds,eax
-    lidt [IDTR]
-
-    sti
-    mov al,8
-    retf
-callv86 endp
-_TEXT32 ends
-
+resetpic endp
 
 ;--- switch back to real-mode and exit
 
 backtoreal proc
     cli
+
+    mov ax,SEL_DATA16
+    mov ds,ax
+    mov ss,ax
+    movzx esp,stkbot
+    mov ax,SEL_FLAT
+    mov es,ax
+    call resetpic
+
 
     mov eax,cr0
     btr eax,31          ; disable paging
@@ -750,17 +951,12 @@ backtoreal proc
     mov cr4,eax
 
     mov ax,SEL_DATA16   ; set SS, DS and ES to 16bit, 64k data
-    mov ds,ax
     mov es,ax
-    mov ss,ax
-    movzx esp,stkbot
 
     mov eax,cr0         ; switch to real mode
     btr eax, 0
     mov cr0,eax
-    db 0eah
-    dw @F
-    dw _TEXT16
+    jmp far16 ptr @F
 @@:
     mov ax,STACK        ; SS=real-mode seg
     mov ss, ax
@@ -768,31 +964,7 @@ backtoreal proc
     push cs             ; DS=real-mode _TEXT16 seg
     pop ds
 
-    lidt [nullidt]      ; IDTR=real-mode compatible values
-
-;--- reprogram PIC: change IRQ 0-7 to INT 08h-0Fh, IRQ 8-15 to INT 70h-77h
-
-    mov al,10001b       ; begin PIC 1 initialization
-    out 20h,al
-    mov al,10001b       ; begin PIC 2 initialization
-    out 0A0h,al
-    mov al,08h          ; IRQ 0-7: back to ints 8h-Fh
-    out 21h,al
-    mov al,70h          ; IRQ 8-15: back to ints 70h-77h
-    out 0A1h,al
-    mov al,100b         ; slave connected to IRQ2
-    out 21h,al
-    mov al,2
-    out 0A1h,al
-    mov al,1            ; Intel environment, manual EOI
-    out 21h,al
-    out 0A1h,al
-    in al,21h
-
-    mov ax,[wPICMask]   ; restore PIC masks
-    out 21h,al
-    mov al,ah
-    out 0A1h,al
+    @lidt [nullidt]     ; IDTR=real-mode compatible values
 
 exit::
     mov bx,fhandle
@@ -906,11 +1078,11 @@ _TEXT16 ends
 
 _TEXT segment para use64 public 'CODE'
 
-bChar   db 0        ;keyboard "buffer"
-
     assume ds:FLAT, es:FLAT, ss:FLAT
 
 long_start proc
+    mov ax,SEL_FLAT
+    mov ss,eax
     mov esp,ecx
     sti             ; now interrupts can be used
     call rsi
@@ -918,111 +1090,16 @@ long_start proc
     int 21h
 long_start endp
 
-;--- screen output helpers
-
-;--- set text mode cursor
-set_cursor proc
-    push rbp
-    push rsi
-    push rcx
-    push rdx
-    mov ebp,400h
-    MOVZX esi, BYTE PTR [ebp+62h]         ;page
-    MOVZX ecx, BYTE PTR [ebp+esi*2+50h+1] ;get cursor pos ROW
-    MOVZX eax, WORD PTR [ebp+4Ah]         ;cols
-    MUL ecx
-    MOVZX edx, BYTE PTR [ebp+esi*2+50h]   ;get cursor pos COL
-    ADD eax, edx
-    movzx ecx,word ptr [ebp+4eh]
-    shr ecx,1
-    add ecx, eax
-    mov dx,[ebp+63h]
-    mov ah,ch
-    mov al,0Eh
-    out dx,ax
-    inc al
-    mov ah,cl
-    out dx,ax
-    pop rdx
-    pop rcx
-    pop rsi
-    pop rbp
-    ret
-set_cursor endp
-
-;--- scroll screen up one line
-;--- rsi = linear address start of last line
-;--- rbp = linear address of BIOS area (0x400)
-scroll_screen proc
-    CLD
-    mov edi,esi
-    movzx eax,word ptr [rbp+4Ah]
-    push rax
-    lea rsi, [rsi+2*rax]
-    MOV CL, [rbp+84h]
-    mul cl
-    mov ecx,eax
-    rep movsw
-    pop rcx
-    mov ax,0720h
-    rep stosw
-    ret
-scroll_screen endp
-
-;--- interprets 10 (line feed)
+;--- write a character
 
 WriteChr proc
-    push rbp
-    push rdi
-    push rsi
-    push rbx
-    push rcx
     push rdx
     push rax
-    MOV edi,0B8000h
-    mov ebp,400h
-    CMP BYTE ptr [rbp+63h],0B4h
-    JNZ @F
-    XOR DI,DI
-@@:
-    movzx ebx, WORD PTR [rbp+4Eh]
-    ADD edi, ebx
-    MOVZX ebx, BYTE PTR [rbp+62h]
-    mov esi, edi
-    MOVZX ecx, BYTE PTR [rbx*2+rbp+50h+1] ;ROW
-    MOVZX eax, WORD PTR [rbp+4Ah]
-    MUL ecx
-    MOVZX edx, BYTE PTR [rbx*2+rbp+50h]  ;COL
-    ADD eax, edx
-    MOV DH,CL
-    LEA edi, [rdi+rax*2]
-    MOV AL, [rsp]
-    CMP AL, 13
-    JZ skipchar
-    CMP AL, 10
-    JZ newline
-    MOV [rdi], AL
-    MOV byte ptr [rdi+1], 07
-    INC DL
-    CMP DL, BYTE PTR [rbp+4Ah]
-    JB @F
-newline:
-    MOV DL, 00
-    INC DH
-    CMP DH, BYTE PTR [rbp+84h]
-    JBE @F
-    DEC DH
-    CALL scroll_screen
-@@:
-    MOV [rbx*2+rbp+50h],DX
-skipchar:
+    mov dl,al
+    mov ah,2
+    int 21h
     pop rax
     pop rdx
-    pop rcx
-    pop rbx
-    pop rsi
-    pop rdi
-    pop rbp
     RET
 WriteChr endp
 
@@ -1087,19 +1164,33 @@ excno = 0
     endm
 @@:
     call WriteStrX
-    db 10,"Exception ",0
+    db 13,10,"Exception ",0
     pop rax
     call WriteB
     call WriteStrX
-    db " errcode=",0
+    db " rsp=",0
+    mov rax,rsp
+    call WriteQW
+if 0
+    call WriteStrX
+    db " rsi=",0
+    mov rax,rsi
+    call WriteQW
+    call WriteStrX
+    db " rdi=",0
+    mov rax,rdi
+    call WriteQW
+endif
+    call WriteStrX
+    db 13,10," [rsp]=",0
     mov rax,[rsp+0]
     call WriteQW
-    call WriteStrX
-    db " rip=",0
+    mov al,' '
+    call WriteChr
     mov rax,[rsp+8]
     call WriteQW
-    call WriteStrX
-    db 10,"[rsp]=",0
+    mov al,' '
+    call WriteChr
     mov rax,[rsp+16]
     call WriteQW
     mov al,' '
@@ -1110,12 +1201,13 @@ excno = 0
     call WriteChr
     mov rax,[rsp+32]
     call WriteQW
-    mov al,' '
-    call WriteChr
+
+    call WriteStrX
+    db 13,10,"      ",0
     mov rax,[rsp+40]
     call WriteQW
-    call WriteStrX
-    db 10,"      ",0
+    mov al,' '
+    call WriteChr
     mov rax,[rsp+48]
     call WriteQW
     mov al,' '
@@ -1130,8 +1222,8 @@ excno = 0
     call WriteChr
     mov rax,[rsp+72]
     call WriteQW
-    mov al,10
-    call WriteChr
+    call WriteStrX
+    db 13,10,0
     sti
     mov ax,4cffh
     int 21h
@@ -1157,112 +1249,76 @@ Irq080F:
     out 0A0h,al
     jmp Irq0007_1
 
-keyboard:
-    push rax
-    in al,60h
-    test al,80h
-    jnz @F
-    push rbx
-    mov bx,_TEXT
-    movzx ebx,bx
-    shl ebx,4
-    mov [ebx+offset bChar], al
-    pop rbx
-@@:
-    in al,61h           ; give finishing information
-    out 61h,al          ; to keyboard...
-    mov al,20h
-    out 20h,al          ; ...and interrupt controller
-    pop rax
-    iretq
+;--- load lower 32-bit of 64-bit regs without loosing the upper 32bits
 
-         ;   0   1   2   3   4   5   6   7   8   9
-keycodes db 0bh,02h,03h,04h,05h,06h,07h,08h,09h,0Ah
-         ;   a   b   c   d   e   f   g   h   i   j
-         db 1eh,30h,2eh,20h,12h,21h,22h,23h,17h,24h
-         ;   k   l   m   n   o   p   q   r   s   t
-         db 25h,26h,32h,31h,18h,19h,10h,13h,1fh,14h
-         ;   u   v   w   x   y   z
-         db 16h,2fh,11h,2dh,15h,2ch,1ch
-lkeycodes equ $ - keycodes
-chars    db '0123456789'
-         db 'abcdefghij'
-         db 'klmnopqrst'
-         db 'uvwxyz',0dh
+@loadreg macro reg
+    push R&reg
+    mov E&reg,[rsp+8].RMCS.rE&reg
+    mov [rsp],E&reg
+    pop R&reg
+endm
 
 ;--- simple int 21h handler.
-;--- emulates functions
-;---   01h : read from stdin with echo
-;---   02h : write to stdout
-;---   4Ch : terminate program
+;--- handles ah=4Ch
+;--- any other DOS function is transfered to real-mode
 
 int21 proc
-    cmp ah,01h
-    jz int21_01
-    cmp ah,02h
-    jz int21_02
     cmp ah,4Ch
     jz int21_4c
-    cmp ah,30h
-    jz int21_30
-    or byte ptr [rsp+2*8],1 ;set carry flag
-    iretq
-int21_01:
-    call set_cursor
-    push rbx
-    mov bx,_TEXT
-    movzx ebx,bx
-    shl ebx,4
-nochar:
-    cmp byte ptr [ebx+ offset bChar],0
-    jnz @F
-    hlt
-    jmp nochar
-@@:
-    mov al,[ebx+ offset bChar]
-    mov byte ptr [ebx+offset bChar],0
-;--- check if the key is a 'known' one (alphanumeric or Enter)
-    push rsi
-    mov rsi,0
-nextkey:
-    cmp al,[rbx+rsi+offset keycodes]
-    jz @F
-    inc rsi
-    cmp rsi,lkeycodes
-    jnz nextkey
-    pop rsi
-    pop rbx
-    jmp int21_01
-@@:
-    mov al,[rbx+rsi+offset chars]
-    push rax
-    cmp al,0dh
-    jnz @F
-    mov al,0ah
-@@:
-    call WriteChr
-    pop rax
-    pop rsi
-    pop rbx
-    iretq
-int21_02:
-    mov al,dl
-    call WriteChr
+    and byte ptr [rsp+2*8],0FEh ;clear carry flag
+    sub rsp,38h
+    mov [rsp].RMCS.rEDI, edi
+    mov [rsp].RMCS.rESI, esi
+    mov [rsp].RMCS.rEBP, ebp
+    mov [rsp].RMCS.rEBX, ebx
+    mov [rsp].RMCS.rEDX, edx
+    mov [rsp].RMCS.rECX, ecx
+    mov [rsp].RMCS.rEAX, eax
+    mov word ptr [rsp].RMCS.rFlags, 0002h
+    mov word ptr [rsp].RMCS.rDS, _TEXT
+    mov word ptr [rsp].RMCS.rES, _TEXT
+    mov dword ptr [rsp].RMCS.regSP, 0
+    push rdi
+    lea rdi,[rsp+8]
+    mov bx,21h
+    mov cx,0
+    mov ax,0300h
+    int 31h
+    pop rdi
+    jnc int21_exit
+    or  byte ptr [rsp+38h+2*8],1    ;set carry flag
+int21_exit:
+    @loadreg DI
+    @loadreg SI
+    @loadreg BP
+    @loadreg BX
+    @loadreg DX
+    @loadreg CX
+    @loadreg AX
+    lea rsp,[rsp+38h]
     iretq
 int21_4c:
     jmp [bv]
 bv  label ptr far32
     dd offset backtoreal
     dw SEL_CODE16
-int21_30:
-    mov ax,SEL_FLAT ;call to compatibility mode requires a valid SS
-    mov ss,ax
+int21 endp
+
+int31 proc
+    cmp ax,0300h
+    jz int31_300
+ret_with_carry:
+    or byte ptr [rsp+2*8],1 ;set carry flag
+    iretq
+int31_300:
+    and byte ptr [rsp+2*8],0FEh
     call [v86]
+    jc ret_with_carry
     iretq
 v86 label ptr far32
-    dd offset callv86
-    dw SEL_CODE32
-int21 endp
+    dd offset call_rmode	;use a far32 call to ensure HIWORD(EIP) isn't lost
+    dw SEL_CODE16
+int31 endp
 
 _TEXT ends
 

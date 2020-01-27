@@ -3,12 +3,15 @@
 ;--- may look that can be loaded by dos64stb.bin.
 
 ;--- the .x64 directive is not really needed.
-;--- it is here so we don't have to use the Win64
-;--- calling convention in INVOKE.
+;--- it is here so we don't have to use the -win64
+;--- cmdline option, which also activates the Win64
+;--- calling convention ( not wanted here ).
 
     .x64
     .model flat
     option casemap:none
+
+    include dpmi.inc
 
 lf  equ 10 
 
@@ -42,33 +45,31 @@ lbuffer equ $ - offset buffer
 
 main proc
 
-	mov rax,offset main
-
     call set_exception_handlers
     invoke printf, CStr(<lf,"Mon64 loaded at %lX, rsp=%lX",lf>), rbx, rsp
 nextcmd:
-    invoke printf, CStr(<"(cmds: a,c,d,r,q or x): ">)
+    invoke printf, CStr(<"(cmds: a,c,d,q,r,s or x): ">)
     mov ah,1        ;read a key from keyboard with echo
     int 21h
     lea rcx,[nextcmd]
     push rcx
     mov qwRsp, rsp
     push rax
-    mov dl,lf
-    mov ah,2        ;write a char to screen
-    int 21h
+    invoke printf, CStr(lf)
     pop rax
-    cmp al,'a'      ; 'a'?
+    cmp al,'a'
     jz a_cmd
-    cmp al,'c'      ; 'c'?
+    cmp al,'c'
     jz c_cmd
-    cmp al,'d'      ; 'd'?
+    cmp al,'d'
     jz d_cmd
-    cmp al,'q'      ; 'q'?
+    cmp al,'q'
     jz q_cmd
-    cmp al,'r'      ; 'r'?
+    cmp al,'r'
     jz r_cmd
-    cmp al,'x'      ; 'x'?
+    cmp al,'s'
+    jz s_cmd
+    cmp al,'x'
     jz x_cmd
     cmp al,0dh      ;ENTER?
     jz newline
@@ -105,8 +106,8 @@ c_cmd endp
 
 a_cmd proc
     invoke printf, CStr(<"enter start address for d cmd: ">)
-    mov rdi,0
-    mov rbx,offset buffer
+    mov rdi, 0
+    lea rbx, buffer
 nextkey:
     mov ah,1
     int 21h
@@ -116,9 +117,7 @@ nextkey:
     inc rdi
     cmp rdi,lbuffer-1
     jnz nextkey
-    mov dl,0ah
-    mov ah,2
-    int 21h
+    invoke printf,CStr(lf)
 enter_pressed:    
     and edi,edi        ;at least 1 digit entered?
     jz done
@@ -148,10 +147,11 @@ enter_pressed:
 @@:
     mov [address],rsi
 done:
+    invoke printf, CStr(lf)
     ret
 error:
     lea rsi, [buffer]
-    invoke printf, CStr(<"%s?",lf>), rsi
+    invoke printf, CStr(<lf,"%s?",lf>), rsi
     ret
 
 a_cmd endp
@@ -191,9 +191,9 @@ nextline:
         inc rdi
         dec cl
     .endw
-    mov dl,10
-    mov ah,2
-    int 21h
+    push rcx
+    invoke printf,CStr(lf)
+    pop rcx
     dec ch
     jnz nextline
     mov [address],rdi
@@ -213,6 +213,66 @@ r_cmd proc
     invoke printf, CStr(<"r14=%16lX  r15=%16lX",lf>), r14, r15
     ret
 r_cmd endp
+
+;--- display system registers
+
+s_cmd proc
+    sub rsp,16
+    sgdt [rsp]
+    mov rdi, [rsp+2]
+    movzx rsi, word ptr [rsp]
+    invoke printf, CStr(<"GDTR base=%lX  limit=%X",lf>), rdi, rsi
+    inc rsi
+    xor ebx,ebx
+    .while rbx < rsi
+        mov ch, [rdi+7]
+        mov cl, [rdi+4]
+        shl ecx,16
+        mov cx, [rdi+2]
+        movzx rdx, word ptr [rdi+5]
+        xor eax,eax
+        mov al, dh
+        and al, 0Fh
+        shl eax, 16
+        mov ax, [rdi+0]
+        test dh,80h
+        jz @F
+        shl rax,12
+        or ax,0fffh
+@@:
+        mov r8, rax
+        invoke printf, CStr(<"%04X: base=%08lX, limit=%08lX, attr=%04X",lf>), rbx, rcx, r8, rdx
+        add rdi,8
+        add rbx,8
+    .endw
+
+    sidt [rsp]
+    mov rdi, [rsp+2]
+    movzx rsi, word ptr [rsp]
+    invoke printf, CStr(<"IDTR base=%lX  limit=%X",lf>), rdi, rsi
+    invoke printf, CStr(<" #      addr     attr      addr     attr      addr     attr      addr     attr",lf>)
+    xor ebx,ebx
+    .while ebx < 64
+        test bl,3
+        jnz @F
+        invoke printf, CStr(<"%2X ">), rbx
+@@:
+        mov si,[rdi+6]
+        shl esi,16
+        mov si,[rdi+0]
+        movzx ecx,word ptr [rdi+2]
+        movzx edx,word ptr [rdi+4]
+        invoke printf, CStr(<"%4X:%08X-%4X ">), rcx, rsi, rdx
+        inc ebx
+        test bl,3
+        jnz @F
+        invoke printf, CStr(<lf>)
+@@:
+        add rdi,16
+    .endw
+    add rsp,16
+    ret
+s_cmd endp
 
 ;--- display xmm registers
 

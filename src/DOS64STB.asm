@@ -5,8 +5,14 @@
 ;--- To create the binary enter:
 ;---  JWasm -mz DOS64stb.asm
 
-    .x64p
+    .model small
+    .dosseg
     option casemap:none
+    .stack 5120
+
+DGROUP group _TEXT	;makes a tiny model
+
+    .x64p
 
     include peimage.inc
     include dpmi.inc
@@ -15,7 +21,7 @@
 
 ?MPIC equ 78h
 ?SPIC equ 70h	; isn't changed
-?IDT32 equ 0	;1=setup a IDT in legacy protected-mode (needed if an exc occurs there)
+?IDT32 equ 0	; 1=setup a IDT in legacy protected-mode (needed for debugging only)
 
 EMM struct  ;XMS block move help struct
 _size  dd ?
@@ -24,6 +30,8 @@ srcofs dd ?
 dsthdl dw ?
 dstofs dd ?
 EMM ends
+
+;--- in 16-bit code, use 32-bit variants of some opcodes
 
 @stosw macro
     db 67h
@@ -58,7 +66,7 @@ endm
     lidt addr
 endm
 
-@wait macro
+@wait macro         ;for debugging only
 local lbl1
 ;    push ax
 lbl1:
@@ -73,21 +81,25 @@ endm
 
 @errorexit macro text
 local sym
+    .const
+sym db text,13,10,'$'
+    .code
     mov dx,offset sym
     mov ah,9
     int 21h
     jmp exit
-sym db text,13,10,'$'
 endm
 
 @fatexit macro text
 local sym
+    .const
+sym db text,13,10,'$'
+    .code
     mov dx,offset sym
     mov ah,9
     int 21h
     mov ah,4Ch
     int 21h
-sym db text,13,10,'$'
 endm
 
 ;--- 16bit start/exit code
@@ -97,10 +109,16 @@ SEL_FLAT   equ 2*8
 SEL_CODE16 equ 3*8
 SEL_DATA16 equ 4*8
 
-_TEXT16 segment use16 para public 'CODE'
+    .code
 
-    assume ds:_TEXT16
-    assume es:_TEXT16
+    assume ds:_TEXT
+    assume es:_TEXT
+
+GDT dq 0                    ; null descriptor
+    dw 0FFFFh,0,9A00h,0AFh  ; 64-bit code descriptor
+    dw 0FFFFh,0,9200h,0CFh  ; 32-bit flat data descriptor
+    dw 0FFFFh,0,9A00h,0h    ; 16-bit, 64k code descriptor
+    dw 0FFFFh,0,9200h,0h    ; 16-bit, 64k data descriptor
 
 GDTR label fword        ; Global Descriptors Table Register
     dw 5*8-1            ; limit of GDT (size minus one)
@@ -120,13 +138,6 @@ llg label fword
 llgofs dd offset long_start
     dw SEL_CODE64
   
-    align 8
-GDT dq 0                    ; null descriptor
-    dw 0FFFFh,0,9A00h,0AFh  ; 64-bit code descriptor
-    dw 0FFFFh,0,9200h,0CFh  ; 32-bit flat data descriptor
-    dw 0FFFFh,0,9A00h,0h    ; 16-bit, 64k code descriptor
-    dw 0FFFFh,0,9200h,0h    ; 16-bit, 64k data descriptor
-
 if ?IDT32
 IDT32 label qword
       dw offset exc3200+00,SEL_CODE16,8e00h,0	;00
@@ -149,35 +160,63 @@ IDT32 label qword
       dw offset exc3200+68,SEL_CODE16,8e00h,0	;11
 endif
 
-savedint6x label dword
-    dw offset jmpirq0,_TEXT16
-    dw offset jmpirq1,_TEXT16
-    dw offset jmpirq2,_TEXT16
-    dw offset jmpirq3,_TEXT16
-    dw offset jmpirq4,_TEXT16
-    dw offset jmpirq5,_TEXT16
-    dw offset jmpirq6,_TEXT16
-    dw offset jmpirq7,_TEXT16
-storedIRQ0_7 label dword
-    dd 8 dup (?)
+if ?MPIC ne 8
+savedintM label dword
+    dw offset jmpirq0,_TEXT
+    dw offset jmpirq1,_TEXT
+    dw offset jmpirq2,_TEXT
+    dw offset jmpirq3,_TEXT
+    dw offset jmpirq4,_TEXT
+    dw offset jmpirq5,_TEXT
+    dw offset jmpirq6,_TEXT
+    dw offset jmpirq7,_TEXT
+endif
+if ?SPIC ne 70h
+savedintS label dword
+    dw offset jmpirq8,_TEXT
+    dw offset jmpirq9,_TEXT
+    dw offset jmpirqA,_TEXT
+    dw offset jmpirqB,_TEXT
+    dw offset jmpirqC,_TEXT
+    dw offset jmpirqD,_TEXT
+    dw offset jmpirqE,_TEXT
+    dw offset jmpirqF,_TEXT
+endif
+
+xmsaddr dd 0
+;PhysAdr dd 0    ;physical address of allocated EMB
+adjust  dd 0
+dwSavedESP dd 0
+        dw SEL_FLAT
+stkbot  dw 0 
+        dw _TEXT
+xmshdl  dw -1
+fhandle dw -1
+
+    .data?
 
 nthdr   IMAGE_NT_HEADERS <>
 sechdr  IMAGE_SECTION_HEADER <>
-xmsaddr dd 0
-PhysAdr dd 0    ;physical address of allocated EMB
-ImgBase dd 0
-adjust  dd 0	;
-fname   dd 0
-dwSavedESP dd 0
-        dw SEL_FLAT
 emm     EMM <>
 emm2    EMM <>
-xmshdl  dw -1
-fhandle dw -1
-stkbot  dw 0 
-        dw _TEXT16
+if ?MPIC ne 8
+storedIRQ0_7 label dword
+        dd 8 dup (?)
+endif
+if ?SPIC ne 70h
+storedIRQ8_F label dword
+        dd 8 dup (?)
+endif
+ImgBase dd ?
+fname   dd ?
+if ?MPIC ne 8
+bPICM   db ?
+endif
+if ?SPIC ne 70h
+bPICS   db ?
+endif
 
-wPICMask dw 0   ; variable to save/restore PIC masks
+    .code
 
 start16 proc
     push cs
@@ -356,8 +395,8 @@ imagetoolarge:
     jz @F
     @errorexit "cannot lock EMB."
 @@:
-    mov word ptr PhysAdr+0,bx
-    mov word ptr PhysAdr+2,dx
+;    mov word ptr PhysAdr+0,bx
+;    mov word ptr PhysAdr+2,dx
     mov word ptr ImgBase+0,bx
     mov word ptr ImgBase+2,dx
 ;--- copy the header into extended memory
@@ -415,6 +454,8 @@ imagetoolarge:
     bts eax,0           ; enable pmode
     mov cr0,eax
 
+;--- in 16-bit protected-mode now
+
     mov ax,SEL_DATA16
     mov ss,ax
     movzx esp,sp
@@ -435,9 +476,8 @@ imagetoolarge:
     add esi, edi    ;RVA->linear
     add ecx, esi    ;ecx=end of relocs (linear)
     push ds
-    mov ax,es
-    mov ds,ax
-    assume ds:flat
+    push es
+    pop ds
 nextpage:
     cmp esi, ecx
     jnc reloc_done
@@ -461,10 +501,9 @@ ignreloc:
     jmp nextpage
 reloc_done:
     pop ds
-    assume ds:_TEXT16
 
-;--- setup ebx/rbx with linear address of _TEXT
-    mov bx,_TEXT
+;--- setup ebx/rbx with linear address of _TEXT64
+    mov bx,_TEXT64
     movzx ebx,bx
     shl ebx,4
     add [llgofs], ebx
@@ -578,7 +617,7 @@ call_rmode proc
     cmp dword ptr [esp].RMCS.regSP,0
     jnz @F
     mov [esp].RMCS.regSP,sp
-    mov [esp].RMCS.rSS,_TEXT16
+    mov [esp].RMCS.rSS,_TEXT
 @@:
 
 ;--- disable paging
@@ -799,41 +838,69 @@ next4gb:
     ret
 createPgTabs endp
 
-;--- DS=_TEXT16,ES=FLAT
+;--- DS=_TEXT,ES=FLAT
 
-storeirq07 proc
+storeirq0_F proc
+if ?MPIC ne 8
     mov cx,8
     mov bx,8*4
     mov di,offset storedIRQ0_7
-nextitem:
+@@:
     mov eax, es:[bx]
     mov [di], eax
     add bx,4
     add di,4
-    loop nextitem
+    loop @B
+endif
+if ?SPIC ne 70h
+    mov cx,8
+    mov bx,70h*4
+    mov di,offset storedIRQ8_F
+@@:
+    mov eax, es:[bx]
+    mov [di], eax
+    add bx,4
+    add di,4
+    loop @B
+endif
     ret
-storeirq07 endp
+storeirq0_F endp
 
 ;--- init the real-mode interrupts that are
 ;--- used for IRQs in long mode. This avoids
 ;--- having to restore them each time we temp. switch
 ;--- to real-mode.
-;--- DS=_TEXT16,ES=FLAT
+;--- DS=_TEXT,ES=FLAT
 
 setintxxvecs proc
+if ?MPIC ne 8
     mov cx,8
     mov bx,4*?MPIC
-    mov di,offset savedint6x
-nextitem:
+    mov di,offset savedintM
+@@:
     mov eax, [di]
     xchg eax, es:[bx]
     mov [di], eax
     add bx,4
     add di,4
-    loop nextitem
+    loop @B
+endif
+if ?SPIC ne 70h
+    mov cx,8
+    mov bx,4*?SPIC
+    mov di,offset savedintS
+@@:
+    mov eax, [di]
+    xchg eax, es:[bx]
+    mov [di], eax
+    add bx,4
+    add di,4
+    loop @B
+endif
     ret
 setintxxvecs endp
 
+if ?MPIC ne 8
 ;--- jmp to the IRQ handlers in real-mode
 jmpirq0:jmp cs:[storedIRQ0_7+00]
 jmpirq1:jmp cs:[storedIRQ0_7+04]
@@ -843,21 +910,19 @@ jmpirq4:jmp cs:[storedIRQ0_7+16]
 jmpirq5:jmp cs:[storedIRQ0_7+20]
 jmpirq6:jmp cs:[storedIRQ0_7+24]
 jmpirq7:jmp cs:[storedIRQ0_7+28]
+endif
 
-;--- reprogram PIC: change IRQ 0-7 to INT 80h-87h, IRQ 8-15 to INT 88h-8Fh
+;--- reprogram PIC: change IRQ 0-7 to INT 78h-7fh
 ;--- ES=FLAT
 
 setpic proc
 
-    in al,0A1h
-    mov ah,al
-    in al,21h
-    mov [wPICMask],ax
-
-    call storeirq07
+    call storeirq0_F
     call setintxxvecs
 
 if ?MPIC ne 8
+    in al,21h
+    mov bPICM,al
     mov al,10001b       ; begin PIC 1 initialization
     out 20h,al
     mov al,?MPIC        ; IRQ 0-7: interrupts 80h-87h
@@ -869,6 +934,8 @@ if ?MPIC ne 8
     in al,21h
 endif
 if ?SPIC ne 70h
+    in al,0A1h
+    mov bPICS,al
     mov al,10001b       ; begin PIC 2 initialization
     out 0A0h,al
     mov al,?SPIC        ; IRQ 8-15: interrupts 88h-8Fh
@@ -877,14 +944,12 @@ if ?SPIC ne 70h
     out 0A1h,al
     in al,0A1h
 endif
-    mov ax,[wPICMask]
 if ?MPIC ne 8
-;    mov al,11111100b    ; enable only clock IRQ
+    mov al,bPICM
     out 21h,al
 endif
 if ?SPIC ne 70h
-;    mov al,11111111b
-    mov al,ah
+    mov al,bPICS
     out 0A1h,al
 endif
     ret
@@ -892,32 +957,38 @@ setpic endp
 
 ;--- reprogram PIC: change IRQ 0-7 to INT 08h-0Fh
 ;--- ES=FLAT
-;--- DS=_TEXT16
+;--- DS=_TEXT
 
 resetpic proc 
 
+if ?MPIC ne 8
     mov al,10001b       ; begin PIC 1 initialization
     out 20h,al
-;    mov al,10001b       ; begin PIC 2 initialization
-;    out 0A0h,al
     mov al,08h          ; IRQ 0-7: back to ints 8h-Fh
     out 21h,al
-;    mov al,70h          ; IRQ 8-15: back to ints 70h-77h
-;    out 0A1h,al
     mov al,100b         ; slave connected to IRQ2
     out 21h,al
-;   mov al,2
-;    out 0A1h,al
     mov al,1            ; Intel environment, manual EOI
     out 21h,al
-;    out 0A1h,al
-
     in al,21h
-    mov ax,[wPICMask]   ; restore PIC masks
-    out 21h,al
-    mov al,ah
+endif
+if ?SPIC ne 70h
+    mov al,10001b       ; begin PIC 2 initialization
+    out 0A0h,al
+    mov al,70h          ; IRQ 8-15: back to ints 70h-77h
     out 0A1h,al
-
+    mov al,2
+    out 0A1h,al
+    in  al,0A1h
+endif
+if ?MPIC ne 8
+    mov al,bPICM
+    out 21h,al
+endif
+if ?SPIC ne 70h
+    mov al,bPICS
+    out 0A1h,al
+endif
     call setintxxvecs
 
     ret
@@ -961,7 +1032,7 @@ backtoreal proc
     mov ax,STACK        ; SS=real-mode seg
     mov ss, ax
 
-    push cs             ; DS=real-mode _TEXT16 seg
+    push cs             ; DS=real-mode _TEXT seg
     pop ds
 
     @lidt [nullidt]     ; IDTR=real-mode compatible values
@@ -1065,8 +1136,6 @@ readsection proc
     ret
 readsection endp
 
-_TEXT16 ends
-
 ;--- here's the 64bit code segment.
 ;--- since 64bit code is always flat but the DOS mz format is segmented,
 ;--- there are restrictions - because the assembler doesn't know the
@@ -1076,7 +1145,7 @@ _TEXT16 ends
 ;--- + 64bit offsets (mov rax, offset <var>) must be adjusted by the linear
 ;---   address where the 64bit segment was loaded (is in rbx).
 
-_TEXT segment para use64 public 'CODE'
+_TEXT64 segment para use64 public 'CODE'
 
     assume ds:FLAT, es:FLAT, ss:FLAT
 
@@ -1090,7 +1159,7 @@ long_start proc
     int 21h
 long_start endp
 
-;--- write a character
+;--- interprets 10 (line feed)
 
 WriteChr proc
     push rdx
@@ -1164,7 +1233,7 @@ excno = 0
     endm
 @@:
     call WriteStrX
-    db 13,10,"Exception ",0
+    db 10,"Exception ",0
     pop rax
     call WriteB
     call WriteStrX
@@ -1182,7 +1251,7 @@ if 0
     call WriteQW
 endif
     call WriteStrX
-    db 13,10," [rsp]=",0
+    db 10," [rsp]=",0
     mov rax,[rsp+0]
     call WriteQW
     mov al,' '
@@ -1203,7 +1272,7 @@ endif
     call WriteQW
 
     call WriteStrX
-    db 13,10,"      ",0
+    db 10,"      ",0
     mov rax,[rsp+40]
     call WriteQW
     mov al,' '
@@ -1222,8 +1291,8 @@ endif
     call WriteChr
     mov rax,[rsp+72]
     call WriteQW
-    call WriteStrX
-    db 13,10,0
+    mov al,10
+    call WriteChr
     sti
     mov ax,4cffh
     int 21h
@@ -1275,8 +1344,8 @@ int21 proc
     mov [rsp].RMCS.rECX, ecx
     mov [rsp].RMCS.rEAX, eax
     mov word ptr [rsp].RMCS.rFlags, 0002h
-    mov word ptr [rsp].RMCS.rDS, _TEXT
-    mov word ptr [rsp].RMCS.rES, _TEXT
+    mov word ptr [rsp].RMCS.rDS, STACK
+    mov word ptr [rsp].RMCS.rES, STACK
     mov dword ptr [rsp].RMCS.regSP, 0
     push rdi
     lea rdi,[rsp+8]
@@ -1299,8 +1368,8 @@ int21_exit:
     iretq
 int21_4c:
     jmp [bv]
-bv  label ptr far32
-    dd offset backtoreal
+bv  label ptr far16
+    dw offset backtoreal
     dw SEL_CODE16
 int21 endp
 
@@ -1320,12 +1389,6 @@ v86 label ptr far32
     dw SEL_CODE16
 int31 endp
 
-_TEXT ends
-
-;--- 5k stack, used in 16-bit modes
-
-STACK segment use16 para stack 'STACK'
-    db 5120 dup (?)
-STACK ends
+_TEXT64 ends
 
     end start16

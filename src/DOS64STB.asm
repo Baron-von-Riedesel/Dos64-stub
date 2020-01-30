@@ -1,6 +1,6 @@
 
 ;--- DOS stub program which switches to long-mode and back.
-;--- Note: requires at least JWasm v2.
+;--- Note: requires at least JWasm v2.13!
 ;--- Also: needs a 64bit cpu in real-mode to run.
 ;--- To create the binary enter:
 ;---  JWasm -mz DOS64stb.asm
@@ -112,13 +112,34 @@ SEL_DATA16 equ 4*8
     .code
 
     assume ds:_TEXT
-    assume es:_TEXT
 
 GDT dq 0                    ; null descriptor
     dw 0FFFFh,0,9A00h,0AFh  ; 64-bit code descriptor
     dw 0FFFFh,0,9200h,0CFh  ; 32-bit flat data descriptor
     dw 0FFFFh,0,9A00h,0h    ; 16-bit, 64k code descriptor
     dw 0FFFFh,0,9200h,0h    ; 16-bit, 64k data descriptor
+
+if ?IDT32
+IDT32 label qword
+    dw offset exc3200+00,SEL_CODE16,8e00h,0	;00
+    dw offset exc3200+04,SEL_CODE16,8e00h,0	;01
+    dw offset exc3200+08,SEL_CODE16,8e00h,0	;02
+    dw offset exc3200+12,SEL_CODE16,8e00h,0	;03
+    dw offset exc3200+16,SEL_CODE16,8e00h,0	;04
+    dw offset exc3200+20,SEL_CODE16,8e00h,0	;05
+    dw offset exc3200+24,SEL_CODE16,8e00h,0	;06
+    dw offset exc3200+28,SEL_CODE16,8e00h,0	;07
+    dw offset exc3200+32,SEL_CODE16,8e00h,0	;08
+    dw offset exc3200+36,SEL_CODE16,8e00h,0	;09
+    dw offset exc3200+40,SEL_CODE16,8e00h,0	;0A
+    dw offset exc3200+44,SEL_CODE16,8e00h,0	;0B
+    dw offset exc3200+48,SEL_CODE16,8e00h,0	;0C
+    dw offset exc3200+52,SEL_CODE16,8e00h,0	;0D
+    dw offset exc3200+56,SEL_CODE16,8e00h,0	;0E
+    dw offset exc3200+60,SEL_CODE16,8e00h,0	;0F
+    dw offset exc3200+64,SEL_CODE16,8e00h,0	;10
+    dw offset exc3200+68,SEL_CODE16,8e00h,0	;11
+endif
 
 GDTR label fword        ; Global Descriptors Table Register
     dw 5*8-1            ; limit of GDT (size minus one)
@@ -138,75 +159,29 @@ llg label fword
 llgofs dd offset long_start
     dw SEL_CODE64
   
-if ?IDT32
-IDT32 label qword
-      dw offset exc3200+00,SEL_CODE16,8e00h,0	;00
-      dw offset exc3200+04,SEL_CODE16,8e00h,0	;01
-      dw offset exc3200+08,SEL_CODE16,8e00h,0	;02
-      dw offset exc3200+12,SEL_CODE16,8e00h,0	;03
-      dw offset exc3200+16,SEL_CODE16,8e00h,0	;04
-      dw offset exc3200+20,SEL_CODE16,8e00h,0	;05
-      dw offset exc3200+24,SEL_CODE16,8e00h,0	;06
-      dw offset exc3200+28,SEL_CODE16,8e00h,0	;07
-      dw offset exc3200+32,SEL_CODE16,8e00h,0	;08
-      dw offset exc3200+36,SEL_CODE16,8e00h,0	;09
-      dw offset exc3200+40,SEL_CODE16,8e00h,0	;0A
-      dw offset exc3200+44,SEL_CODE16,8e00h,0	;0B
-      dw offset exc3200+48,SEL_CODE16,8e00h,0	;0C
-      dw offset exc3200+52,SEL_CODE16,8e00h,0	;0D
-      dw offset exc3200+56,SEL_CODE16,8e00h,0	;0E
-      dw offset exc3200+60,SEL_CODE16,8e00h,0	;0F
-      dw offset exc3200+64,SEL_CODE16,8e00h,0	;10
-      dw offset exc3200+68,SEL_CODE16,8e00h,0	;11
-endif
-
-if ?MPIC ne 8
-savedintM label dword
-    dw offset jmpirq0,_TEXT
-    dw offset jmpirq1,_TEXT
-    dw offset jmpirq2,_TEXT
-    dw offset jmpirq3,_TEXT
-    dw offset jmpirq4,_TEXT
-    dw offset jmpirq5,_TEXT
-    dw offset jmpirq6,_TEXT
-    dw offset jmpirq7,_TEXT
-endif
-if ?SPIC ne 70h
-savedintS label dword
-    dw offset jmpirq8,_TEXT
-    dw offset jmpirq9,_TEXT
-    dw offset jmpirqA,_TEXT
-    dw offset jmpirqB,_TEXT
-    dw offset jmpirqC,_TEXT
-    dw offset jmpirqD,_TEXT
-    dw offset jmpirqE,_TEXT
-    dw offset jmpirqF,_TEXT
-endif
-
 xmsaddr dd 0
 ;PhysAdr dd 0    ;physical address of allocated EMB
 adjust  dd 0
 dwSavedESP dd 0
         dw SEL_FLAT
-stkbot  dw 0 
-        dw _TEXT
+stkbot  dw 0,_TEXT
 xmshdl  dw -1
 fhandle dw -1
 
     .data?
 
+if ?MPIC ne 8
+storedIntM label dword
+        dd 8 dup (?)
+endif
+if ?SPIC ne 70h
+storedIntS label dword
+        dd 8 dup (?)
+endif
 nthdr   IMAGE_NT_HEADERS <>
 sechdr  IMAGE_SECTION_HEADER <>
 emm     EMM <>
 emm2    EMM <>
-if ?MPIC ne 8
-storedIRQ0_7 label dword
-        dd 8 dup (?)
-endif
-if ?SPIC ne 70h
-storedIRQ8_F label dword
-        dd 8 dup (?)
-endif
 ImgBase dd ?
 fname   dd ?
 if ?MPIC ne 8
@@ -514,7 +489,9 @@ reloc_done:
 
     call createIDT
     call createPgTabs
+    call storeints
     call setpic
+    call setints
 
     mov eax,cr4
     bts eax,5           ; enable physical-address extensions (PAE)
@@ -838,13 +815,14 @@ next4gb:
     ret
 createPgTabs endp
 
+;--- save the interrupt vectors that we will modify
 ;--- DS=_TEXT,ES=FLAT
 
-storeirq0_F proc
+storeints proc
 if ?MPIC ne 8
     mov cx,8
-    mov bx,8*4
-    mov di,offset storedIRQ0_7
+    mov bx,?MPIC*4
+    mov di,offset storedIntM
 @@:
     mov eax, es:[bx]
     mov [di], eax
@@ -854,8 +832,8 @@ if ?MPIC ne 8
 endif
 if ?SPIC ne 70h
     mov cx,8
-    mov bx,70h*4
-    mov di,offset storedIRQ8_F
+    mov bx,?SPIC*4
+    mov di,offset storedIntS
 @@:
     mov eax, es:[bx]
     mov [di], eax
@@ -864,62 +842,58 @@ if ?SPIC ne 70h
     loop @B
 endif
     ret
-storeirq0_F endp
+storeints endp
 
-;--- init the real-mode interrupts that are
-;--- used for IRQs in long mode. This avoids
-;--- having to restore them each time we temp. switch
-;--- to real-mode.
+;--- restore the interrupt vectors that we have modified
 ;--- DS=_TEXT,ES=FLAT
 
-setintxxvecs proc
+restoreints proc
 if ?MPIC ne 8
     mov cx,8
-    mov bx,4*?MPIC
-    mov di,offset savedintM
-@@:
-    mov eax, [di]
-    xchg eax, es:[bx]
-    mov [di], eax
-    add bx,4
-    add di,4
-    loop @B
+    mov di,?MPIC*4
+    mov si,offset storedIntM
+    rep movsd
 endif
 if ?SPIC ne 70h
     mov cx,8
-    mov bx,4*?SPIC
-    mov di,offset savedintS
-@@:
-    mov eax, [di]
-    xchg eax, es:[bx]
-    mov [di], eax
-    add bx,4
-    add di,4
-    loop @B
+    mov di,?SPIC*4
+    mov si,offset storedIntS
+    rep movsd
 endif
     ret
-setintxxvecs endp
+restoreints endp
 
+;--- set the interrupt vectors that we will
+;--- use for IRQs while in long mode. This avoids
+;--- having to reprogram PICs for switches to real-mode
+;--- DS=_TEXT,ES=FLAT
+
+setints proc
+    push ds
+    push es
+    pop ds
 if ?MPIC ne 8
-;--- jmp to the IRQ handlers in real-mode
-jmpirq0:jmp cs:[storedIRQ0_7+00]
-jmpirq1:jmp cs:[storedIRQ0_7+04]
-jmpirq2:jmp cs:[storedIRQ0_7+08]
-jmpirq3:jmp cs:[storedIRQ0_7+12]
-jmpirq4:jmp cs:[storedIRQ0_7+16]
-jmpirq5:jmp cs:[storedIRQ0_7+20]
-jmpirq6:jmp cs:[storedIRQ0_7+24]
-jmpirq7:jmp cs:[storedIRQ0_7+28]
+    mov cx,8
+    mov si,8*4
+    mov di,?MPIC*4
+    rep movsd
 endif
+if ?SPIC ne 70h
+    mov cx,8
+    mov si,70h*4
+    mov di,?SPIC*4
+    rep movsd
+endif
+    pop ds
+    ret
+setints endp
 
-;--- reprogram PIC: change IRQ 0-7 to INT 78h-7fh
-;--- ES=FLAT
+;--- reprogram PIC
+;--- DS=_TEXT,ES=FLAT
 
 setpic proc
 
-    call storeirq0_F
-    call setintxxvecs
-
+;--- change IRQ 0-7 to ?MPIC
 if ?MPIC ne 8
     in al,21h
     mov bPICM,al
@@ -933,6 +907,7 @@ if ?MPIC ne 8
     out 21h,al
     in al,21h
 endif
+;--- change IRQ 8-F to ?SPIC
 if ?SPIC ne 70h
     in al,0A1h
     mov bPICS,al
@@ -989,8 +964,6 @@ if ?SPIC ne 70h
     mov al,bPICS
     out 0A1h,al
 endif
-    call setintxxvecs
-
     ret
 resetpic endp
 
@@ -1006,7 +979,7 @@ backtoreal proc
     mov ax,SEL_FLAT
     mov es,ax
     call resetpic
-
+    call restoreints
 
     mov eax,cr0
     btr eax,31          ; disable paging
@@ -1029,11 +1002,9 @@ backtoreal proc
     mov cr0,eax
     jmp far16 ptr @F
 @@:
-    mov ax,STACK        ; SS=real-mode seg
-    mov ss, ax
-
-    push cs             ; DS=real-mode _TEXT seg
-    pop ds
+    mov ax, cs
+    mov ss, ax          ; SS=DGROUP
+    mov ds, ax          ; DS=DGROUP
 
     @lidt [nullidt]     ; IDTR=real-mode compatible values
 
@@ -1297,7 +1268,7 @@ endif
     mov ax,4cffh
     int 21h
 
-;--- clock and keyboard interrupts
+;--- IRQs 0-7 (clock IRQ is handled)
 
 clock:
     push rbp
@@ -1312,6 +1283,7 @@ Irq0007_1:
     pop rax
 swint:
     iretq
+;--- IRQs 8-F
 Irq080F:
     push rax
     mov al,20h

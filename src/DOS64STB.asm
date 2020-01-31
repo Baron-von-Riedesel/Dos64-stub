@@ -111,7 +111,7 @@ SEL_DATA16 equ 4*8
 
     .code
 
-    assume ds:_TEXT
+    assume ds:DGROUP
 
 GDT dq 0                    ; null descriptor
     dw 0FFFFh,0,9A00h,0AFh  ; 64-bit code descriptor
@@ -1326,9 +1326,12 @@ int21 proc
     mov ax,0300h
     int 31h
     pop rdi
-    jnc int21_exit
+    jc int21_carry
+    test byte ptr [rsp].RMCS.rFlags,1   ;has real-mode DOS set the C flag?
+    jz @F
+int21_carry:
     or  byte ptr [rsp+38h+2*8],1    ;set carry flag
-int21_exit:
+@@:
     @loadreg DI
     @loadreg SI
     @loadreg BP

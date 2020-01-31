@@ -1,4 +1,7 @@
 
+   30.1.2020:
+   - carry flag of real-mode DOS call wasn't transfered to 64-bit.
+
    26.1.2020:
    - removed 32-bit segment, jump directly from 16-bit to 64-bit.
    - reprogram master pic only, IRQ0-7 mapped at INT 78-7Fh.

@@ -22,6 +22,8 @@ DGROUP group _TEXT	;makes a tiny model
 ?MPIC equ 78h
 ?SPIC equ 70h	; isn't changed
 ?IDT32 equ 0	; 1=setup a IDT in legacy protected-mode (needed for debugging only)
+?PDPTE equ 64   ; size in GB of page tables ( max is 1024 GB )
+?PML4E equ (?PDPTE-1)/512+1
 
 EMM struct  ;XMS block move help struct
 _size  dd ?
@@ -155,16 +157,11 @@ endif
 nullidt label fword
     dw 3FFh
     dd 0
-llg label fword
-llgofs dd offset long_start
-    dw SEL_CODE64
   
 xmsaddr dd 0
 ;PhysAdr dd 0    ;physical address of allocated EMB
 adjust  dd 0
-dwSavedESP dd 0
-        dw SEL_FLAT
-stkbot  dw 0,_TEXT
+wStkBot dw 0,DGROUP
 xmshdl  dw -1
 fhandle dw -1
 
@@ -228,7 +225,7 @@ endif
     push ds
     pop ss
     mov sp,ax       ; make a TINY model, CS=SS=DS=ES
-    mov stkbot,sp
+    mov wStkBot,sp
 
     smsw ax
     test al,1
@@ -355,7 +352,7 @@ imagetoolarge:
 ;---         1 page  for PDPT (64 PDPTEs, 64 * 1GB )
 ;---        64 pages for PD (64 * 512 * PDEs, each 2MB )
 ;--- total: 67 pages = 268 kB     
-    add dx, 268 + 3 ;extra 3 since we need to align to page boundary
+    add dx, (2+?PML4E+?PDPTE)*4 + 3 ;extra 3 kB since we need to align to page boundary
     jc imagetoolarge
     mov ah,9
     call xmsaddr
@@ -482,10 +479,12 @@ reloc_done:
     movzx ebx,bx
     shl ebx,4
     add [llgofs], ebx
+    add [llgofs2], ebx
 
     mov edi,ImgBase
     add edi,nthdr.OptionalHeader.SizeOfImage
     add edi,dword ptr nthdr.OptionalHeader.SizeOfStackReserve
+    mov dword ptr [IDTR+2], edi
 
     call createIDT
     call createPgTabs
@@ -503,6 +502,8 @@ reloc_done:
     bts eax,8           ; enable long mode
     wrmsr
 
+    @lidt [IDTR]
+
 ;--- long_start expects:
 ;--- ecx = value of ESP in 64-bit
 ;--- esi = value of EIP in 64-bit
@@ -515,11 +516,17 @@ reloc_done:
     add ecx,nthdr.OptionalHeader.SizeOfImage
     add ecx,ebx
 
+    mov ax,SEL_FLAT		;it's necessary to load ss with a 32bit data sel!
+    mov ss,eax
+;    mov esp,ecx
+
     mov eax,cr0
     bts eax,31
     mov cr0,eax         ; enable paging
 
-    jmp [llg]
+    db 66h,0eah         ; jmp far32
+llgofs dd offset long_start
+    dw SEL_CODE64
 
 start16 endp
 
@@ -571,32 +578,21 @@ endif
 call_rmode proc
 
     cli
-    pushad
-    mov ax,SEL_DATA16
-    mov es,ax
-    mov es:dwSavedESP,esp
-    mov ss,ax
-    movzx esp,ss:stkbot
-    sub sp,sizeof RMCS
     mov ax, SEL_FLAT
+    mov ss, ax
+    mov ax, SEL_DATA16
     mov ds, ax
-    push ss
-    pop es
-    cld
-    mov esi,edi
-    mov edi,esp
-    mov ecx,(sizeof RMCS)/2
-    @rep movsw
-
+    mov es, ax
     shl bx,2
-    mov eax,ds:[bx]
-    mov dword ptr [esp].RMCS.regIP, eax
+    mov ecx,ss:[bx]
+    mov dword ptr [esp].RMCS.regIP, ecx
+    mov bx, wStkBot
+    sub bx, 40h
     cmp dword ptr [esp].RMCS.regSP,0
     jnz @F
-    mov [esp].RMCS.regSP,sp
-    mov [esp].RMCS.rSS,_TEXT
+    mov [esp].RMCS.regSP, bx
+    mov [esp].RMCS.rSS,DGROUP
 @@:
-
 ;--- disable paging
     mov eax,cr0
     btr eax,31
@@ -608,9 +604,9 @@ call_rmode proc
     btr eax,8
     wrmsr
 
-    mov ax,SEL_DATA16   ; set DS and ES to 16bit, 64k data
-    mov es,ax
-    mov ds,ax
+    mov ax,ds
+    mov ss,ax
+    movzx esp,bx
 
 ;--- switch to real-mode, then back to prot-mode
 
@@ -637,13 +633,14 @@ call_rmode proc
     push offset backtopm
     jmp dword ptr cs:[adjust]
 backtopm:
-    lss sp,dword ptr cs:[stkbot]
+    cli
+    lss sp,dword ptr cs:wStkBot
+    lea esp,[esp-(8+6+4+4)]	;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
     push gs
     push fs
     push ds
     push es
     pushf
-    cli
     @lgdt cs:[GDTR]     ; use 32-bit version of LGDT
     pushad
 
@@ -655,10 +652,14 @@ backtopm:
     or al,1
     mov cr0,eax
     mov ax,SEL_DATA16
-    mov ss,ax
     mov ds,ax
+	mov dx,DGROUP
+	movzx edx,dx
+	shl edx,4
+	movzx esp,wStkBot
     mov ax,SEL_FLAT
-    mov es,ax
+    mov ss,ax
+	lea esp,[esp+edx-40h]
 if 0
     db 0eah
     dw offset @F
@@ -677,27 +678,18 @@ endif
     bts eax,31
     mov cr0, eax
 
-    mov edi,dwSavedESP	;restore EDI
-    mov edi,es:[edi]
-    movzx esi,sp
-    mov ecx,8+2
-    cld
-    @rep movsd
-    @movsw
-    lss esp, fword ptr dwSavedESP
-    popad
-    sti
+    db 66h,0eah         ; jmp far32
+llgofs2 dd offset back_to_long
+    dw SEL_CODE64
 
-    db 66h
-    retf
 call_rmode endp
 
 ;--- create IDT for long mode
 ;--- EDI->free memory
+;--- EBX->linear address of stub start
 ;--- ES=FLAT
 
 createIDT proc
-    mov dword ptr [IDTR+2], edi
 
     mov ecx,32
     mov edx, offset exception
@@ -734,8 +726,6 @@ make_exc_gates:
     call make_int_gates
     pop edi
 
-    @lidt [IDTR]
-
     sub edi, 1000h
 
 ;--- setup IRQ0, Int21, Int31
@@ -771,7 +761,7 @@ createPgTabs proc
     mov cr3, edi    ; load page-map level-4 base
 
     push edi
-    mov ecx,02000h/4
+    mov ecx,(1000h + ?PML4E*1000h)/4
     sub eax,eax
     @rep stosd       ; clear 2 pages (PML4 & PDPT)
     pop edi
@@ -779,39 +769,40 @@ createPgTabs proc
 ;--- DI+0    : PML4
 ;--- DI+1000 : PDPT
 
-    push edi
-    mov eax,edi
+    lea eax,[edi+1000h]
     or eax,111b
+
+    xor ecx, ecx
+    repeat ?PML4E
+    mov es:[edi+ecx],eax
     add eax, 1000h
-    mov es:[edi+0h],eax     ; set first PML4E in PML4 (bits 38-47)
+    add ecx, 8
+    endm
+
     add edi,1000h           ; let EDI point to PDPT
-    mov cx,64               ; map 64 PDPTEs
-    add eax, 1000h
-nextpdpte:
+    push edi
+    mov cx,?PDPTE           ; map PDPTEs (default is 64)
+@@:
     mov es:[edi],eax        ; set PDPTE in PDPT (bits 30-37)
     add eax, 1000h
-    add edi,8
-    loop nextpdpte
+    add edi, 8
+    loop @B
     pop edi
-    add edi,2000h
 
-;--- map the first 64 GBs (64 * 512 * 2MB pages)
+    add edi,?PML4E*1000h
 
-    mov dl,16       ;16 * 4 GB
-    mov esi,0
-next4gb:
-;--- init 4 PDEs (4 * 4 kB); this maps 4 GB
-    mov cx,512*4            ; number of PDE entries in PD
-    mov eax,87h             ; set PS (bit 7 -> page size = 2 MB)
+;--- map the first ?PDPTE GBs (64 * 512 * 2MB pages)
+
+    mov ecx,?PDPTE*512      ; number of PDE entries in PD
+    xor edx,edx
+    mov eax,80h+7h          ; set PS (bit 7 -> page size = 2 MB)
 @@:
     mov es:[edi+0],eax      ; set PDE in PD (bits 21-29)
-    mov es:[edi+4],esi
+    mov es:[edi+4],edx
     add edi,8
     add eax, 200000h
-    loop @B
-    inc esi
-    dec dl
-    jnz next4gb
+    adc edx, 0
+    loopd @B
     ret
 createPgTabs endp
 
@@ -975,7 +966,7 @@ backtoreal proc
     mov ax,SEL_DATA16
     mov ds,ax
     mov ss,ax
-    movzx esp,stkbot
+    movzx esp,wStkBot
     mov ax,SEL_FLAT
     mov es,ax
     call resetpic
@@ -1121,16 +1112,15 @@ _TEXT64 segment para use64 public 'CODE'
     assume ds:FLAT, es:FLAT, ss:FLAT
 
 long_start proc
-    mov ax,SEL_FLAT
-    mov ss,eax
-    mov esp,ecx
+    mov esp,ecx		; this also clears high32 of rsp
     sti             ; now interrupts can be used
+    mov esi,esi     ; clear high32 of rsi
     call rsi
     mov ah,4Ch
     int 21h
 long_start endp
 
-;--- interprets 10 (line feed)
+;--- low level screen output for default exception handlers
 
 WriteChr proc
     push rdx
@@ -1327,8 +1317,9 @@ int21 proc
     int 31h
     pop rdi
     jc int21_carry
-    test byte ptr [rsp].RMCS.rFlags,1   ;has real-mode DOS set the C flag?
-    jz @F
+    mov al,byte ptr [rsp].RMCS.rFlags
+    mov byte ptr [rsp+38h+2*8],al    ;set CF,ZF,...
+    jmp @F
 int21_carry:
     or  byte ptr [rsp+38h+2*8],1    ;set carry flag
 @@:
@@ -1342,8 +1333,8 @@ int21_carry:
     lea rsp,[rsp+38h]
     iretq
 int21_4c:
-    jmp [bv]
-bv  label ptr far16
+    jmp [pback_to_real]
+pback_to_real label ptr far16
     dw offset backtoreal
     dw SEL_CODE16
 int21 endp
@@ -1355,13 +1346,58 @@ ret_with_carry:
     or byte ptr [rsp+2*8],1 ;set carry flag
     iretq
 int31_300:
-    and byte ptr [rsp+2*8],0FEh
-    call [v86]
-    jc ret_with_carry
-    iretq
-v86 label ptr far32
-    dd offset call_rmode	;use a far32 call to ensure HIWORD(EIP) isn't lost
+    and byte ptr [rsp+2*8],0FEh	;clear carry flag
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rbp
+    push rsi
+    push rdi
+    mov rsi,rdi
+
+;--- the contents of the RMCS has to be copied
+;--- to conventional memory. We use 64 bytes of
+;--- the DGROUP stack, additionally save value or RSP
+;--- there at offset 38h.
+
+    mov ax,DGROUP
+    movzx eax,ax
+    shl eax,4
+    movzx edi,word ptr [eax+offset wStkBot] 
+    lea edi,[edi+eax-40h]
+    mov [edi+38h],rsp
+    mov esp,edi
+    movsq   ;copy 32h bytes, the full RMCS struct
+    movsq
+    movsq
+    movsq
+    movsq
+    movsq
+    movsw
+    jmp [pcall_rmode]
+pcall_rmode label ptr far16
+    dw offset call_rmode
     dw SEL_CODE16
+back_to_long::
+    mov esi,esp
+    mov rsp,[esp+38h]
+    mov rdi,[rsp]
+    cld
+    movsq   ;copy 2Ah bytes back, don't copy CS:IP & SS:SP fields
+    movsq
+    movsq
+    movsq
+    movsq
+    movsw
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    iretq
 int31 endp
 
 _TEXT64 ends

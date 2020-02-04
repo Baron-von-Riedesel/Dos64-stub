@@ -11,18 +11,17 @@
     .model flat
     option casemap:none
 
-    include dpmi.inc
-
 lf  equ 10 
 
-;--- define a string (modifies rax!)
+;--- define a string
 CStr macro text:vararg
 local sym
     .const
 sym db text,0
     .code
-	lea rax,sym
-    exitm <rax>
+;    lea rax,sym
+;    exitm <rax>
+    exitm <addr sym>	;works since jwasm v2.13
 endm
 
     .data
@@ -73,8 +72,7 @@ nextcmd:
     jz x_cmd
     cmp al,0dh      ;ENTER?
     jz newline
-    mov rcx, rax
-    invoke printf, CStr(<"unknown cmd: %c",lf>), rcx
+    invoke printf, CStr(<"unknown cmd: %c",lf>), rax
 newline:
     ret
 main endp

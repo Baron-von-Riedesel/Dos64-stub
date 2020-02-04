@@ -177,7 +177,7 @@ print_string:		;print string SI
 
 print_string_chars:
 
-	.while (byte ptr [esi])
+	.while (byte ptr [rsi])
 		lodsb
 		push rax
 		call handle_char	;print char of string

@@ -38,20 +38,17 @@
    - image must contain base relocations
    - no dll references ("imports") are possible
    - base of image must be < 4 GB
-  
+
   There's a sample, Mon64.asm, supplied, that allows to display
   a few 64-bit resources. It also shows how the Int21 emulation
-  installed by dos64stb is supposed to be used.
+  installed by dos64stb is supposed to be used. It's possible to call
+  other real-mode interrupts than int 21h - in this case one has to 
+  use DPMI function int 31h, ax=300h, directly. 
 
-  Note that when jwasm is used to assemble a 64-bit binary, it may
-  emit a warning that an underscore is needed for the start label.
-  This warning is to be ignored.
-
-  The 64-bit binary runs in ring 0, 64-bit protected-mode. There is
-  no BIOS or Windows API available. The first 64 GB of memory are 
-  "identity mapped" by the stub. The memory that is "owned" by the
-  binary is everything between the image base and the stackpointer.
-
+  The 64-bit binary runs in ring 0, 64-bit protected-mode. The first
+  64 GB of memory are "identity mapped" by the stub. The memory that
+  is "owned" by the binary is everything between the image base and 
+  the stackpointer.
 
   4. License
   

@@ -1125,6 +1125,13 @@ long_start endp
 WriteChr proc
     push rdx
     push rax
+	cmp al,10
+	jnz @F
+	mov dl,13
+	mov ah,2
+	int 21h
+	mov al,10
+@@:
     mov dl,al
     mov ah,2
     int 21h
@@ -1141,9 +1148,7 @@ WriteStrX proc  ;write string at rip
     lodsb
     and al,al
     jz @F
-    mov dl,al
-    mov ah,2
-    int 21h
+	call WriteChr
     jmp @B
 @@:
     mov [rsp+8],rsi
@@ -1178,10 +1183,7 @@ WriteNb:
     jbe @F
     add al,7
 @@:
-    mov dl,al
-    mov ah,2
-    int 21h
-    ret
+	jmp WriteChr
 
 ;--- exception handler
 
@@ -1201,6 +1203,13 @@ excno = 0
     db " rsp=",0
     mov rax,rsp
     call WriteQW
+    call WriteStrX
+    db " imagebase=",0
+    mov ax,DGROUP
+    movzx eax,ax
+    shl eax,4
+    mov eax,dword ptr [eax+ImgBase]
+    call WriteDW
 if 0
     call WriteStrX
     db " rsi=",0
@@ -1212,7 +1221,7 @@ if 0
     call WriteQW
 endif
     call WriteStrX
-    db 10," [rsp]=",0
+    db 10,"[rsp]=",0
     mov rax,[rsp+0]
     call WriteQW
     mov al,' '

@@ -39,11 +39,14 @@
    - no dll references ("imports") are possible
    - base of image must be < 4 GB
 
-  There's a sample, Mon64.asm, supplied, that allows to display
-  a few 64-bit resources. It also shows how the Int21 emulation
+  There are 2 samples supplied, Mon64.asm and TestC.c. Mon64 allows to
+  display a few 64-bit resources. It also shows how the Int21 emulation
   installed by dos64stb is supposed to be used. It's possible to call
   other real-mode interrupts than int 21h - in this case one has to 
-  use DPMI function int 31h, ax=300h, directly. 
+  use DPMI function int 31h, ax=300h, directly. TestC, the second sample,
+  just shows how C source may be used with the stub. TestC.mak is
+  supplied, which creates the binary using MSVC ( and JWasm, needed to
+  assemble the micro-printf implementation in printf.asm ).
 
   The 64-bit binary runs in ring 0, 64-bit protected-mode. The first
   64 GB of memory are "identity mapped" by the stub. The memory that

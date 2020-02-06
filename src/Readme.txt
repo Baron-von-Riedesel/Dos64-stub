@@ -48,12 +48,19 @@
   supplied, which creates the binary using MSVC ( and JWasm, needed to
   assemble the micro-printf implementation in printf.asm ).
 
-  The 64-bit binary runs in ring 0, 64-bit protected-mode. The first
-  64 GB of memory are "identity mapped" by the stub. The memory that
-  is "owned" by the binary is everything between the image base and 
-  the stackpointer.
+  4. Memory Layout
+  
+  The 64-bit binary runs in ring 0, 64-bit long mode. The first
+  64 GB of memory are "identity mapped" by the stub. This may be adjusted
+  in dosstb64.asm. The allocated memory block will look like this:
+  
+  - Page Tables (default: 1+1+64 pages)
+  - IDT (1 page)
+  - image
+  - stack
+  - heap (optionally)
 
-  4. License
+  5. License
   
   the source is distributed under the GNU GPL 2 license. See file
   COPYING for details. It was written by Andreas Grech.

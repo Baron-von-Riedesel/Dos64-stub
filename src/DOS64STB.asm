@@ -19,11 +19,13 @@ DGROUP group _TEXT	;makes a tiny model
 
     option MZ:sizeof IMAGE_DOS_HEADER   ;set min size of MZ header if jwasm's -mz option is used
 
-?MPIC equ 78h
-?SPIC equ 70h	; isn't changed
+?MPIC equ 78h	; master PIC base, remapped to 78h
+?SPIC equ 70h	; slave PIC, isn't changed
+?PDPTE equ 64   ; entries in PDPT, mapped physical ram, size in GB ( default = 64 GB )
+?PML4E equ (?PDPTE-1)/512+1	;required entries in PML4
+?MAXIMGSIZE equ 100000h	;max size of image+stack in kB ( 100000h = 1 GB )
+?HEAP  equ 0    ; 1=add heapsize of image to amount of memory to be allocated
 ?IDT32 equ 0	; 1=setup a IDT in legacy protected-mode (needed for debugging only)
-?PDPTE equ 64   ; size in GB of page tables ( max is 1024 GB )
-?PML4E equ (?PDPTE-1)/512+1
 
 EMM struct  ;XMS block move help struct
 _size  dd ?
@@ -143,6 +145,8 @@ IDT32 label qword
     dw offset exc3200+68,SEL_CODE16,8e00h,0	;11
 endif
 
+    .data
+
 GDTR label fword        ; Global Descriptors Table Register
     dw 5*8-1            ; limit of GDT (size minus one)
     dd offset GDT       ; linear address of GDT
@@ -159,7 +163,6 @@ nullidt label fword
     dd 0
   
 xmsaddr dd 0
-;PhysAdr dd 0    ;physical address of allocated EMB
 adjust  dd 0
 wStkBot dw 0,DGROUP
 xmshdl  dw -1
@@ -179,6 +182,7 @@ nthdr   IMAGE_NT_HEADERS <>
 sechdr  IMAGE_SECTION_HEADER <>
 emm     EMM <>
 emm2    EMM <>
+PhysBase dd ?    ;physical address start page tables (=CR3)
 ImgBase dd ?
 fname   dd ?
 if ?MPIC ne 8
@@ -214,8 +218,6 @@ endif
     add bx,ax
     mov ah,4Ah
     int 21h         ; free unused memory
-    push cs
-    pop es
 
     mov ax,ss
     mov dx,cs
@@ -245,17 +247,14 @@ endif
     jnz @F
     @fatexit "No XMS host detected."
 @@:
-    push es
     mov ax,4310h
     int 2fh
     mov word ptr [xmsaddr+0],bx
     mov word ptr [xmsaddr+2],es
-    pop es
 
     mov ah,5        ;local enable A20
     call xmsaddr
 
-    push es
     mov ah,51h
     int 21h
     mov es,bx
@@ -270,7 +269,7 @@ endif
     add di,3
     mov word ptr fname+0,di
     mov word ptr fname+2,es
-    pop es
+
     push ds
     lds dx,fname
     mov ax,3D00h
@@ -291,17 +290,17 @@ endif
     jz @F
     @errorexit "invalid file format."
 @@:
-    movzx edx,dx
-    cmp word ptr [edx].IMAGE_DOS_HEADER.e_magic,"ZM"
+    mov di,sp
+    cmp word ptr [di].IMAGE_DOS_HEADER.e_magic,"ZM"
     jz @F
     @errorexit "invalid file format (no MZ header)."
 @@:
-    cmp word ptr [edx].IMAGE_DOS_HEADER.e_lfarlc,sizeof IMAGE_DOS_HEADER
+    cmp word ptr [di].IMAGE_DOS_HEADER.e_lfarlc,sizeof IMAGE_DOS_HEADER
     jnc @F
     @errorexit "invalid file format (MZ header too small)."
 @@:
-    mov cx,word ptr [edx].IMAGE_DOS_HEADER.e_lfanew+2
-    mov dx,word ptr [edx].IMAGE_DOS_HEADER.e_lfanew+0
+    mov cx,word ptr [di].IMAGE_DOS_HEADER.e_lfanew+2
+    mov dx,word ptr [di].IMAGE_DOS_HEADER.e_lfanew+0
     mov ax,4200h
     int 21h
     mov dx,offset nthdr
@@ -312,7 +311,7 @@ endif
     jz @F
     @errorexit "invalid file format (cannot locate PE header)."
 @@:
-    movzx esi,cx
+    mov si,cx
     cmp dword ptr nthdr.Signature,"EP"
     jz @F
     @errorexit "invalid file format (no PE header)."
@@ -337,61 +336,89 @@ endif
     jz @F
     @errorexit "requested stack size of image is > 4 GB."
 @@:
-    mov edx, nthdr.OptionalHeader.SizeOfImage
-    add edx, dword ptr nthdr.OptionalHeader.SizeOfStackReserve
-    jc imagetoolarge
-    shr edx,10      ;convert to kB
-    test edx,0ffff0000h
+if ?HEAP
+    cmp dword ptr nthdr.OptionalHeader.SizeOfHeapReserve+4,0
     jz @F
-imagetoolarge:
-    @errorexit "image requires too much memory."
+    @errorexit "requested heap size of image is > 4 GB."
 @@:
+endif
+    mov edx, nthdr.OptionalHeader.SizeOfImage
+    mov eax, dword ptr nthdr.OptionalHeader.SizeOfStackReserve
+    shr edx,10      ;convert to kB
+    shr eax,10      ;convert to kB
+    add edx, eax
+    jc @F
+if ?HEAP
+    mov eax, dword ptr nthdr.OptionalHeader.SizeOfHeapReserve
+    shr eax,10
+    add edx, eax
+    jc @F
+endif
+    cmp edx,?MAXIMGSIZE
+    jbe memsizeok
+@@:
+if ?HEAP
+    @errorexit "image+stack+heap require more than 1 GB."
+else
+    @errorexit "image+stack require more than 1 GB."
+endif
+memsizeok:
 ;--- add space for IDT and page tables
 ;--- needed: 1 page  for IDT
 ;---         1 page  for PML4 (1 PML4E, 512 GB)
 ;---         1 page  for PDPT (64 PDPTEs, 64 * 1GB )
 ;---        64 pages for PD (64 * 512 * PDEs, each 2MB )
 ;--- total: 67 pages = 268 kB     
-    add dx, (2+?PML4E+?PDPTE)*4 + 3 ;extra 3 kB since we need to align to page boundary
-    jc imagetoolarge
-    mov ah,9
+    add edx, (2+?PML4E+?PDPTE)*4 + 3 ;extra 3 kB since we need to align to page boundary
+
+;--- allocate the extended memory block needed for image + systabs
+    mov ah,89h
     call xmsaddr
     cmp ax,1
     jz @F
     @errorexit "XMS memory allocation failed."
 @@:
-    mov xmshdl,dx
+    mov xmshdl, dx
+    mov emm.dsthdl, dx
+    mov emm2.dsthdl, dx
     mov ah,0Ch      ;lock EMB 
     call xmsaddr
     cmp ax,1
     jz @F
     @errorexit "cannot lock EMB."
 @@:
-;    mov word ptr PhysAdr+0,bx
-;    mov word ptr PhysAdr+2,dx
-    mov word ptr ImgBase+0,bx
-    mov word ptr ImgBase+2,dx
-;--- copy the header into extended memory
-    mov ecx, esi
-    mov emm.srchdl, 0
-    mov word ptr emm.srcofs+0, offset nthdr
-    mov word ptr emm.srcofs+2, ds
-    mov ax,xmshdl
-    mov emm.dsthdl,ax
-    mov emm.dstofs,0
+    push dx
+    push bx
+    pop ebx
 
 ;--- align to page boundary
-    and bx,0fffh
-    jz @F
-    mov eax,1000h
-    sub ax,bx
-    mov emm.dstofs,eax
+
+    mov ax,bx
+    neg ax
+    add ax,1000h
+    and ax,0fffh   ;0000,0400,0800,0C00 converted to 0000, 0C00, 0800, 0400
+    movzx eax,ax
     mov adjust, eax
-    add ImgBase, eax
-@@:
+    add eax, ebx
+    mov PhysBase, eax
+    add eax, 1000h*(1+1+?PML4E+?PDPTE)  ;1*IDT,1*PMLE, ?PML4E*PDPT, ?PDPTE*PD
+    mov ImgBase, eax
+
+;--- prepare EMB moves
+    mov cx, si
+    mov emm.srchdl, 0
+    mov emm2.srchdl, 0
+    mov word ptr emm.srcofs+0, offset nthdr
+    mov word ptr emm.srcofs+2, ds
+    mov word ptr emm2.srcofs+0, sp
+    mov word ptr emm2.srcofs+2, ss
+    mov eax,ImgBase
+    sub eax,PhysBase
+    add eax,adjust
+    mov emm.dstofs,eax
 
     mov si,offset emm
-    call copy2x
+    call copy2x ;copy cx bytes to extended memory
 
     mov di,sp
     mov bx,fhandle
@@ -413,11 +440,11 @@ imagetoolarge:
         dec cx
     .endw
 
-    add sp,4096
-
     mov ah,3Eh
     int 21h
     mov fhandle,-1
+
+    add sp,4096
 
     cli
     @lgdt [GDTR]        ; use 32-bit version of LGDT
@@ -438,6 +465,19 @@ imagetoolarge:
     dw offset @F
     dw SEL_CODE16
 @@:
+
+    mov edi,PhysBase
+    call createPgTabs
+
+;--- setup ebx/rbx with linear address of _TEXT64
+    mov bx,_TEXT64
+    movzx ebx,bx
+    shl ebx,4
+    add [llgofs], ebx
+    add [llgofs2], ebx
+    mov dword ptr [IDTR+2], edi
+    call createIDT
+
 
 ;--- handle base relocations
     mov edi, ImgBase
@@ -474,20 +514,6 @@ ignreloc:
 reloc_done:
     pop ds
 
-;--- setup ebx/rbx with linear address of _TEXT64
-    mov bx,_TEXT64
-    movzx ebx,bx
-    shl ebx,4
-    add [llgofs], ebx
-    add [llgofs2], ebx
-
-    mov edi,ImgBase
-    add edi,nthdr.OptionalHeader.SizeOfImage
-    add edi,dword ptr nthdr.OptionalHeader.SizeOfStackReserve
-    mov dword ptr [IDTR+2], edi
-
-    call createIDT
-    call createPgTabs
     call storeints
     call setpic
     call setints
@@ -588,6 +614,7 @@ call_rmode proc
     mov dword ptr [esp].RMCS.regIP, ecx
     mov bx, wStkBot
     sub bx, 40h
+	sub wStkBot,(8+6+4+4)	;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
     cmp dword ptr [esp].RMCS.regSP,0
     jnz @F
     mov [esp].RMCS.regSP, bx
@@ -633,14 +660,13 @@ call_rmode proc
     push offset backtopm
     jmp dword ptr cs:[adjust]
 backtopm:
-    cli
     lss sp,dword ptr cs:wStkBot
-    lea esp,[esp-(8+6+4+4)]	;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
     push gs
     push fs
     push ds
     push es
     pushf
+    cli
     @lgdt cs:[GDTR]     ; use 32-bit version of LGDT
     pushad
 
@@ -650,16 +676,16 @@ backtopm:
 
     mov eax,cr0
     or al,1
-    mov cr0,eax
+    mov cr0,eax         ;enable protected-mode again   
     mov ax,SEL_DATA16
     mov ds,ax
-	mov dx,DGROUP
-	movzx edx,dx
-	shl edx,4
-	movzx esp,wStkBot
+    mov dx,DGROUP
+    movzx edx,dx
+    shl edx,4
+    add wStkBot,(8+6+4+4)
     mov ax,SEL_FLAT
     mov ss,ax
-	lea esp,[esp+edx-40h]
+    add esp, edx
 if 0
     db 0eah
     dw offset @F
@@ -691,6 +717,7 @@ call_rmode endp
 
 createIDT proc
 
+    push edi
     mov ecx,32
     mov edx, offset exception
     add edx, ebx
@@ -710,9 +737,9 @@ make_exc_gates:
     mov edx,offset swint
     mov si, 8F00h
     call make_int_gates
+    pop edi
 
     push edi
-    lea edi,[edi-1000h]
     push edi
     lea edi,[edi+?MPIC*16]
     mov cx,8
@@ -725,8 +752,6 @@ make_exc_gates:
     mov edx,offset Irq080F
     call make_int_gates
     pop edi
-
-    sub edi, 1000h
 
 ;--- setup IRQ0, Int21, Int31
 
@@ -745,9 +770,8 @@ make_exc_gates:
     mov es:[edi+31h*16+0],ax ; set int 31h handler
     shr eax,16
     mov es:[edi+31h*16+6],ax
-
-    add edi, 1000h
     ret
+
 createIDT endp
 
 ;--- setup page directories and tables
@@ -756,21 +780,20 @@ createIDT endp
 
 createPgTabs proc
 
-    add edi, 0fffh  ;align to page boundary
-    and di,0f000h
     mov cr3, edi    ; load page-map level-4 base
 
     push edi
     mov ecx,(1000h + ?PML4E*1000h)/4
     sub eax,eax
-    @rep stosd       ; clear 2 pages (PML4 & PDPT)
+    @rep stosd       ; clear pages (PML4 & PDPT)
     pop edi
 
 ;--- DI+0    : PML4
 ;--- DI+1000 : PDPT
 
     lea eax,[edi+1000h]
-    or eax,111b
+;    or eax,111b            ;set P,R/W,U
+    or eax,11b              ;set P,R/W,S
 
     xor ecx, ecx
     repeat ?PML4E
@@ -1056,13 +1079,10 @@ readsection proc
     push dx
     push ax
 
-    mov emm2.srchdl, 0
-    mov word ptr emm2.srcofs+0, di
-    mov word ptr emm2.srcofs+2, ds
-    mov ax,xmshdl
-    mov emm2.dsthdl, ax
     mov eax, sechdr.VirtualAddress
     add eax, adjust
+	add eax, ImgBase
+	sub eax, PhysBase
     mov emm2.dstofs, eax
 
     mov eax, sechdr.PointerToRawData

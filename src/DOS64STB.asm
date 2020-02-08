@@ -102,7 +102,6 @@ nullidt label fword     ; IDTR for real-mode
   
 xmsaddr dd 0
 adjust  dd 0
-wStkBot dw 0,0
 xmshdl  dw -1
 fhandle dw -1
 
@@ -123,6 +122,7 @@ emm2    EMM <>   ;another one for nested calls
 PhysBase dd ?    ;linear (+physical) address start of page tables (=CR3)
 ImgBase dd ?     ;linear address image base
 fname   dd ?     ;file name of executable
+wStkBot dw ?,?
 wFlags  dw ?     ;used to store flags register
 if ?MPIC ne 8
 bPICM   db ?     ;saved master PIC mask
@@ -135,27 +135,36 @@ endif
 
 start16 proc
 
+    push cs
+    pop ds
     mov ax,ss
     mov dx,es
     sub ax,dx
     mov bx,sp
     shr bx,4
     add bx,ax
-    mov ah,4Ah
-    int 21h         ; free unused memory
-
-    push cs
-    pop ds
-    mov ax,ss
-    mov dx,cs
-    sub ax,dx
+    mov ax,bx
+    sub ax,10h
     shl ax,4
-    add ax,sp
     push ds
     pop ss
     mov sp,ax       ; make a TINY model, CS=SS=DS
-    mov wStkBot+0,sp
+    mov wStkBot+0,ax
     mov wStkBot+2,ss
+    mov ah,4Ah
+    int 21h         ; free unused memory
+
+    mov es,es:[002Ch]
+    xor di,di
+    xor al,al
+    mov cx,-1
+@@:
+    repnz scasb
+    cmp byte ptr es:[di],0
+    jnz @B
+    add di,3
+    mov word ptr fname+0,di
+    mov word ptr fname+2,es
 
     mov ax,cs
     movzx eax,ax
@@ -189,21 +198,6 @@ start16 proc
 
     mov ah,5        ;local enable A20
     call xmsaddr
-
-    mov ah,51h
-    int 21h
-    mov es,bx
-    mov es,es:[002Ch]
-    xor di,di
-    xor al,al
-    mov cx,-1
-@@:
-    repnz scasb
-    cmp byte ptr es:[di],0
-    jnz @B
-    add di,3
-    mov word ptr fname+0,di
-    mov word ptr fname+2,es
 
     push ds
     lds dx,fname
@@ -418,7 +412,7 @@ memsizeok:
 
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
-    bts eax,8           ; enable long mode
+    or ah,1             ; enable long mode
     wrmsr
 
 ;--- enable protected-mode + paging
@@ -523,11 +517,11 @@ backtoreal proc
 @@:
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
-    btr eax,8           ; disable long mode (EFER.LME=0)
+    and ah,0feh         ; disable long mode (EFER.LME=0)
     wrmsr
 
     mov eax,cr4
-    btr eax,5           ; disable PAE paging
+    and al,0DFh         ; reset bit 5, disable PAE paging
     mov cr4,eax
 
     mov ax, cs
@@ -563,6 +557,7 @@ backtoreal proc
 backtoreal endp
 
 ;--- call real-mode thru DPMI function ax=0x300, bl=intno, edi=RMCS
+;--- ESP=linear address of wStkBot-40h, points to RMCS
 
 call_rmode proc
 
@@ -596,7 +591,7 @@ call_rmode proc
 ;--- disable long mode
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
-    btr eax,8
+    and ah,0feh
     wrmsr
 
     @lidt [nullidt]  ; IDTR=real-mode compatible values
@@ -629,7 +624,7 @@ backtopm:
 ;--- (re)enable long mode
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
-    bts eax,8           ; set long mode
+    or ah,1             ; set long mode
     wrmsr
 
 ;--- enable protected-mode + paging

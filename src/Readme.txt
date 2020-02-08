@@ -28,6 +28,7 @@
    - an installed XMS host
    - enough extended memory to load the image
 
+
   3. Hot to use dos64stub?
 
   The stub is added to a 64-bit binary thru the link step. See file
@@ -41,22 +42,30 @@
 
   There are 2 samples supplied, Mon64.asm and TestC.c. Mon64 allows to
   display a few 64-bit resources. It also shows how the Int21 emulation
-  installed by dos64stb is supposed to be used. It's possible to call
-  other real-mode interrupts than int 21h - in this case one has to 
-  use DPMI function int 31h, ax=300h, directly. TestC, the second sample,
+  installed by dos64stb is supposed to be used. TestC, the second sample,
   just shows how C source may be used with the stub. TestC.mak is
   supplied, which creates the binary using MSVC ( and JWasm, needed to
   assemble the micro-printf implementation in printf.asm ).
+
+  dos64stb installs a tiny subset of the DPMI API. The functions that are
+  supported are:
+   - int 21h, ah=4Ch: terminate program
+   - int 31h, ax=205h: set exception vector BL to CX:RDX
+   - int 31h, ax=300h: simulate real-mode interrupt BL, RDI=real-mode call
+     structure.
+  
 
   4. Memory Layout
   
   The 64-bit binary runs in ring 0, 64-bit long mode. The first
   64 GB of memory are "identity mapped" by the stub. This may be adjusted
-  in dosstb64.asm. The allocated memory block will look like this:
+  in dosstb64.asm. When launched, dos64stb allocates a memory block in
+  extended memory and initializes it like this (from lower to higher 
+  addresses):
   
   - Page Tables (default: 1+1+64 pages)
   - IDT (1 page)
-  - image
+  - 64-bit PE image
   - stack
   - heap (optionally)
 

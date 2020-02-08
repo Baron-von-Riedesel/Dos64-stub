@@ -19,13 +19,16 @@ DGROUP group _TEXT	;makes a tiny model
 
     option MZ:sizeof IMAGE_DOS_HEADER   ;set min size of MZ header if jwasm's -mz option is used
 
-?MPIC equ 78h	; master PIC base, remapped to 78h
-?SPIC equ 70h	; slave PIC, isn't changed
-?PDPTE equ 64   ; entries in PDPT, mapped physical ram, size in GB ( default = 64 GB )
-?PML4E equ (?PDPTE-1)/512+1	;required entries in PML4
-?MAXIMGSIZE equ 100000h	;max size of image+stack in kB ( 100000h = 1 GB )
+?PDPTE equ 64   ; entries in PDPT, mapped physical ram, size in GB (default 64 GB)
+?PML4E equ ((?PDPTE-1) shr 9) + 1	;required entries in PML4
+?MAXIMGSIZE equ 1024*1024	;max size of image+stack in kB (default 1 GB)
 ?HEAP  equ 0    ; 1=add heapsize of image to amount of memory to be allocated
-?IDT32 equ 0	; 1=setup a IDT in legacy protected-mode (needed for debugging only)
+?MPIC  equ 78h	; master PIC base, remapped to 78h
+?SPIC  equ 70h	; slave PIC, isn't changed
+
+if ?PML4E gt 200h
+    .err <256 TB is max. paging capacity>
+endif
 
 EMM struct  ;XMS block move help struct
 _size  dd ?
@@ -35,32 +38,17 @@ dsthdl dw ?
 dstofs dd ?
 EMM ends
 
-;--- in 16-bit code, use 32-bit variants of some opcodes
+;--- define a string
+CStr macro text:vararg
+local sym
+    .const
+sym db text,0
+    .code
+    exitm <offset sym>
+endm
 
-@stosw macro
-    db 67h
-    stosw
-endm
-@stosd macro
-    db 67h
-    stosd
-endm
-@lodsw macro
-    db 67h
-    lodsw
-endm
-@lodsd macro
-    db 67h
-    lodsd
-endm
-@movsw macro
-    db 67h
-    movsw
-endm
-@rep macro cmd
-    db 0f3h,67h
-    cmd
-endm
+;--- in 16-bit code, use 32-bit variants of LGDT, LIDT
+
 @lgdt macro addr
     db 66h
     lgdt addr
@@ -83,29 +71,6 @@ lbl1:
 ;    pop ax
 endm
 
-@errorexit macro text
-local sym
-    .const
-sym db text,13,10,'$'
-    .code
-    mov dx,offset sym
-    mov ah,9
-    int 21h
-    jmp exit
-endm
-
-@fatexit macro text
-local sym
-    .const
-sym db text,13,10,'$'
-    .code
-    mov dx,offset sym
-    mov ah,9
-    int 21h
-    mov ah,4Ch
-    int 21h
-endm
-
 ;--- 16bit start/exit code
 
 SEL_CODE64 equ 1*8
@@ -123,28 +88,6 @@ GDT dq 0                    ; null descriptor
     dw 0FFFFh,0,9A00h,0h    ; 16-bit, 64k code descriptor
     dw 0FFFFh,0,9200h,0h    ; 16-bit, 64k data descriptor
 
-if ?IDT32
-IDT32 label qword
-    dw offset exc3200+00,SEL_CODE16,8e00h,0	;00
-    dw offset exc3200+04,SEL_CODE16,8e00h,0	;01
-    dw offset exc3200+08,SEL_CODE16,8e00h,0	;02
-    dw offset exc3200+12,SEL_CODE16,8e00h,0	;03
-    dw offset exc3200+16,SEL_CODE16,8e00h,0	;04
-    dw offset exc3200+20,SEL_CODE16,8e00h,0	;05
-    dw offset exc3200+24,SEL_CODE16,8e00h,0	;06
-    dw offset exc3200+28,SEL_CODE16,8e00h,0	;07
-    dw offset exc3200+32,SEL_CODE16,8e00h,0	;08
-    dw offset exc3200+36,SEL_CODE16,8e00h,0	;09
-    dw offset exc3200+40,SEL_CODE16,8e00h,0	;0A
-    dw offset exc3200+44,SEL_CODE16,8e00h,0	;0B
-    dw offset exc3200+48,SEL_CODE16,8e00h,0	;0C
-    dw offset exc3200+52,SEL_CODE16,8e00h,0	;0D
-    dw offset exc3200+56,SEL_CODE16,8e00h,0	;0E
-    dw offset exc3200+60,SEL_CODE16,8e00h,0	;0F
-    dw offset exc3200+64,SEL_CODE16,8e00h,0	;10
-    dw offset exc3200+68,SEL_CODE16,8e00h,0	;11
-endif
-
     .data
 
 GDTR label fword        ; Global Descriptors Table Register
@@ -153,18 +96,13 @@ GDTR label fword        ; Global Descriptors Table Register
 IDTR label fword        ; IDTR in long mode
     dw 256*16-1         ; limit of IDT (size minus one)
     dd 0                ; linear address of IDT
-if ?IDT32
-IDTR32 label fword      ; IDTR in legacy mode
-    dw 18*8-1           ; limit of IDT (size minus one)
-    dd offset IDT32
-endif
-nullidt label fword
+nullidt label fword     ; IDTR for real-mode
     dw 3FFh
     dd 0
   
 xmsaddr dd 0
 adjust  dd 0
-wStkBot dw 0,DGROUP
+wStkBot dw 0,0
 xmshdl  dw -1
 fhandle dw -1
 
@@ -180,35 +118,22 @@ storedIntS label dword
 endif
 nthdr   IMAGE_NT_HEADERS <>
 sechdr  IMAGE_SECTION_HEADER <>
-emm     EMM <>
-emm2    EMM <>
-PhysBase dd ?    ;physical address start page tables (=CR3)
-ImgBase dd ?
-fname   dd ?
+emm     EMM <>   ;xms block move structure
+emm2    EMM <>   ;another one for nested calls
+PhysBase dd ?    ;linear (+physical) address start of page tables (=CR3)
+ImgBase dd ?     ;linear address image base
+fname   dd ?     ;file name of executable
+wFlags  dw ?     ;used to store flags register
 if ?MPIC ne 8
-bPICM   db ?
+bPICM   db ?     ;saved master PIC mask
 endif
 if ?SPIC ne 70h
-bPICS   db ?
+bPICS   db ?     ;saved slave PIC mask
 endif
 
     .code
 
 start16 proc
-    push cs
-    pop ds
-    mov ax,cs
-    movzx eax,ax
-    shl eax,4
-    add dword ptr [GDTR+2], eax ; convert offset to linear address
-if ?IDT32
-    add dword ptr [IDTR32+2], eax
-endif
-    mov word ptr [GDT + SEL_DATA16 + 2], ax
-    mov word ptr [GDT + SEL_CODE16 + 2], ax
-    shr eax,16
-    mov byte ptr [GDT + SEL_DATA16 + 4], al
-    mov byte ptr [GDT + SEL_CODE16 + 4], al
 
     mov ax,ss
     mov dx,es
@@ -219,6 +144,8 @@ endif
     mov ah,4Ah
     int 21h         ; free unused memory
 
+    push cs
+    pop ds
     mov ax,ss
     mov dx,cs
     sub ax,dx
@@ -226,27 +153,35 @@ endif
     add ax,sp
     push ds
     pop ss
-    mov sp,ax       ; make a TINY model, CS=SS=DS=ES
-    mov wStkBot,sp
+    mov sp,ax       ; make a TINY model, CS=SS=DS
+    mov wStkBot+0,sp
+    mov wStkBot+2,ss
+
+    mov ax,cs
+    movzx eax,ax
+    shl eax,4
+    add dword ptr [GDTR+2], eax ; convert offset to linear address
+    mov word ptr [GDT + SEL_DATA16 + 2], ax
+    mov word ptr [GDT + SEL_CODE16 + 2], ax
+    shr eax,16
+    mov byte ptr [GDT + SEL_DATA16 + 4], al
+    mov byte ptr [GDT + SEL_CODE16 + 4], al
 
     smsw ax
     test al,1
-    jz @F
-    @fatexit "Mode is V86. Need REAL mode to switch to LONG mode!"
-@@:
+    mov bp,CStr("Mode is V86. Need REAL mode to switch to LONG mode!")
+    jnz @@error
     xor edx,edx
     mov eax,80000001h   ; test if long-mode is supported
     cpuid
     bt edx,29
-    jc @F
-    @fatexit "No 64bit cpu detected."
-@@:
+    mov bp,CStr("No 64bit cpu detected.")
+    jnc @@error
     mov ax,4300h
     int 2fh         ;XMS host available?
     test al,80h
-    jnz @F
-    @fatexit "No XMS host detected."
-@@:
+    mov bp,CStr("No XMS host detected.")
+    jz @@error
     mov ax,4310h
     int 2fh
     mov word ptr [xmsaddr+0],bx
@@ -275,9 +210,8 @@ endif
     mov ax,3D00h
     int 21h
     pop ds
-    jnc @F
-    @errorexit "cannot open file."
-@@:
+    mov bp,CStr("cannot open file.")
+    jc  @@error
     mov fhandle,ax
     mov bx,ax
 ;--- load the file header
@@ -287,18 +221,15 @@ endif
     mov ah,3Fh
     int 21h
     cmp ax,cx
-    jz @F
-    @errorexit "invalid file format."
-@@:
+    mov bp,CStr("invalid file format.")
+    jnz @@error
     mov di,sp
     cmp word ptr [di].IMAGE_DOS_HEADER.e_magic,"ZM"
-    jz @F
-    @errorexit "invalid file format (no MZ header)."
-@@:
+    mov bp,CStr("invalid file format (no MZ header).")
+    jnz @@error
     cmp word ptr [di].IMAGE_DOS_HEADER.e_lfarlc,sizeof IMAGE_DOS_HEADER
-    jnc @F
-    @errorexit "invalid file format (MZ header too small)."
-@@:
+    mov bp,CStr("invalid file format (MZ header too small).")
+    jb @@error
     mov cx,word ptr [di].IMAGE_DOS_HEADER.e_lfanew+2
     mov dx,word ptr [di].IMAGE_DOS_HEADER.e_lfanew+0
     mov ax,4200h
@@ -308,39 +239,30 @@ endif
     mov ah,3Fh
     int 21h
     cmp ax,cx
-    jz @F
-    @errorexit "invalid file format (cannot locate PE header)."
-@@:
-    mov si,cx
+    mov bp,CStr("invalid file format (cannot locate PE header).")
+    jnz @@error
     cmp dword ptr nthdr.Signature,"EP"
-    jz @F
-    @errorexit "invalid file format (no PE header)."
-@@:
+    mov bp,CStr("invalid file format (no PE header).")
+    jnz @@error
     cmp nthdr.FileHeader.Machine,IMAGE_FILE_MACHINE_AMD64
-    jz @F
-    @errorexit "not a 64-bit binary."
-@@:
+    mov bp,CStr("not a 64-bit binary.")
+    jnz @@error
     test nthdr.FileHeader.Characteristics,IMAGE_FILE_RELOCS_STRIPPED
-    jz @F
-    @errorexit "relocations stripped, cannot load."
-@@:
+    mov bp,CStr("relocations stripped, cannot load.")
+    jnz @@error
     cmp nthdr.OptionalHeader.Subsystem,IMAGE_SUBSYSTEM_NATIVE
-    jz @F
-    @errorexit "subsystem not native, cannot load."
-@@:
+    mov bp,CStr("subsystem not native, cannot load.")
+    jnz @@error
     cmp nthdr.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT*sizeof IMAGE_DATA_DIRECTORY].Size_,0
-    jz @F
-    @errorexit "image contains imports, cannot load."
-@@:
+    mov bp,CStr("image contains imports, cannot load.")
+    jnz @@error
     cmp dword ptr nthdr.OptionalHeader.SizeOfStackReserve+4,0
-    jz @F
-    @errorexit "requested stack size of image is > 4 GB."
-@@:
+    mov bp,CStr("requested stack size of image is > 4 GB.")
+    jnz @@error
 if ?HEAP
     cmp dword ptr nthdr.OptionalHeader.SizeOfHeapReserve+4,0
-    jz @F
-    @errorexit "requested heap size of image is > 4 GB."
-@@:
+    mov bp,CStr("requested heap size of image is > 4 GB.")
+    jnz @@error
 endif
     mov edx, nthdr.OptionalHeader.SizeOfImage
     mov eax, dword ptr nthdr.OptionalHeader.SizeOfStackReserve
@@ -358,10 +280,11 @@ endif
     jbe memsizeok
 @@:
 if ?HEAP
-    @errorexit "image+stack+heap require more than 1 GB."
+    mov bp,CStr("image+stack+heap require more than 1 GB.")
 else
-    @errorexit "image+stack require more than 1 GB."
+    mov bp,CStr("image+stack require more than 1 GB.")
 endif
+    jmp @@error
 memsizeok:
 ;--- add space for IDT and page tables
 ;--- needed: 1 page  for IDT
@@ -375,18 +298,16 @@ memsizeok:
     mov ah,89h
     call xmsaddr
     cmp ax,1
-    jz @F
-    @errorexit "XMS memory allocation failed."
-@@:
+    mov bp,CStr("XMS memory allocation failed.")
+    jnz @@error
     mov xmshdl, dx
     mov emm.dsthdl, dx
     mov emm2.dsthdl, dx
     mov ah,0Ch      ;lock EMB 
     call xmsaddr
     cmp ax,1
-    jz @F
-    @errorexit "cannot lock EMB."
-@@:
+    mov bp,CStr("cannot lock EMB.")
+    jnz @@error
     push dx
     push bx
     pop ebx
@@ -405,7 +326,6 @@ memsizeok:
     mov ImgBase, eax
 
 ;--- prepare EMB moves
-    mov cx, si
     mov emm.srchdl, 0
     mov emm2.srchdl, 0
     mov word ptr emm.srcofs+0, offset nthdr
@@ -416,11 +336,36 @@ memsizeok:
     sub eax,PhysBase
     add eax,adjust
     mov emm.dstofs,eax
+    mov eax, adjust
+    mov emm2.dstofs, eax
 
-    mov si,offset emm
-    call copy2x ;copy cx bytes to extended memory
+    push ds
+    pop es
 
+;--- init page tables
     mov di,sp
+    call createPgTabs
+
+;--- setup ebx/rbx with linear address of _TEXT64
+    mov ebx,_TEXT64
+    shl ebx,4
+    add [llgofs], ebx
+    add [llgofs2], ebx
+;--- init IDT
+    mov eax,ImgBase
+    sub eax,1000h
+    mov dword ptr [IDTR+2], eax
+    call createIDT
+    mov cx, 1000h
+    mov si, offset emm2
+    call copy2ext ;copy IDT to extended memory
+
+    mov ecx, sizeof IMAGE_NT_HEADERS
+    mov si, offset emm
+    call copy2ext ;copy PE header (ecx bytes) to extended memory
+
+;--- now read & copy section headers ony by one;
+;--- for each header read & copy section data.
     mov bx,fhandle
     mov cx,nthdr.FileHeader.NumberOfSections
     .while cx
@@ -430,97 +375,45 @@ memsizeok:
         mov ah,3Fh
         int 21h
         cmp ax,cx
-        jz @F
-        @errorexit "cannot load section headers."
-@@:
+        mov bp,CStr("cannot load section headers.")
+        jnz @@error
         mov si,offset emm
-        call copy2x
+        call copy2ext	;copy section header to PE header in image
+        xor cx,cx
+        xor dx,dx
+        mov ax,4201h	;get current file pos in DX:AX
+        int 21h
+        push dx
+        push ax
         call readsection
+        pop dx
+        pop cx
+        mov ax,4200h	;restore file pos
+        int 21h
         pop cx
         dec cx
     .endw
+
+    add sp,4096
 
     mov ah,3Eh
     int 21h
     mov fhandle,-1
 
-    add sp,4096
+;--- the extended memory block has been setup with page tabs, IDT and image
 
-    cli
-    @lgdt [GDTR]        ; use 32-bit version of LGDT
-
-    mov eax,cr0
-    bts eax,0           ; enable pmode
-    mov cr0,eax
-
-;--- in 16-bit protected-mode now
-
-    mov ax,SEL_DATA16
-    mov ss,ax
-    movzx esp,sp
-    mov ds,ax
-    mov ax,SEL_FLAT
-    mov es,ax
-    db 0eah
-    dw offset @F
-    dw SEL_CODE16
-@@:
-
-    mov edi,PhysBase
-    call createPgTabs
-
-;--- setup ebx/rbx with linear address of _TEXT64
-    mov bx,_TEXT64
-    movzx ebx,bx
-    shl ebx,4
-    add [llgofs], ebx
-    add [llgofs2], ebx
-    mov dword ptr [IDTR+2], edi
-    call createIDT
-
-
-;--- handle base relocations
-    mov edi, ImgBase
-    mov esi, nthdr.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC*sizeof IMAGE_DATA_DIRECTORY].VirtualAddress
-    mov ecx, nthdr.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC*sizeof IMAGE_DATA_DIRECTORY].Size_
-    mov edx, edi
-    sub edx, dword ptr nthdr.OptionalHeader.ImageBase
-    add esi, edi    ;RVA->linear
-    add ecx, esi    ;ecx=end of relocs (linear)
-    push ds
-    push es
-    pop ds
-nextpage:
-    cmp esi, ecx
-    jnc reloc_done
-    push ecx
-    @lodsd              ;get RVA of page
-    mov ebx, eax
-    add ebx, edi        ;convert RVA to linear address
-    @lodsd
-    lea ecx, [esi+eax-8];ecx=end of relocs for this page
-    xor eax, eax
-nextreloc:
-    @lodsw
-    test ah,0F0h        ;must be < 1000h (size of a page)
-    jz ignreloc
-    and ah,0Fh			;usually it's type 0A (dir64)
-    add [eax+ebx], edx	;we adjust low32 only, since we cannot load beyond 4 GB
-ignreloc:
-    cmp esi, ecx
-    jb nextreloc
-    pop ecx
-    jmp nextpage
-reloc_done:
-    pop ds
-
-    call storeints
-    call setpic
     call setints
 
+    cli
+    call setpic
+    @lgdt [GDTR]        ; use 32-bit version of LGDT
+    @lidt [IDTR]
+
+;--- long_start expects linear address of image base (PE header) in ebx
+    mov ebx,ImgBase
+
     mov eax,cr4
-    bts eax,5           ; enable physical-address extensions (PAE)
-    bts eax,9           ; also enable OSFXSR (no exception using SSE)
+    or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
     mov cr4,eax
 
     mov ecx,0C0000080h  ; EFER MSR
@@ -528,76 +421,146 @@ reloc_done:
     bts eax,8           ; enable long mode
     wrmsr
 
-    @lidt [IDTR]
-
-;--- long_start expects:
-;--- ecx = value of ESP in 64-bit
-;--- esi = value of EIP in 64-bit
-;--- ebx = image start
-
-    mov ebx,ImgBase
-    mov esi,nthdr.OptionalHeader.AddressOfEntryPoint
-    add esi,ebx
-    mov ecx,dword ptr nthdr.OptionalHeader.SizeOfStackReserve
-    add ecx,nthdr.OptionalHeader.SizeOfImage
-    add ecx,ebx
-
-    mov ax,SEL_FLAT		;it's necessary to load ss with a 32bit data sel!
-    mov ss,eax
-;    mov esp,ecx
-
+;--- enable protected-mode + paging
     mov eax,cr0
-    bts eax,31
-    mov cr0,eax         ; enable paging
+    or eax,80000001h
+    mov cr0,eax
 
     db 66h,0eah         ; jmp far32
 llgofs dd offset long_start
     dw SEL_CODE64
+@@error::
+    mov si,bp
+nextchar:
+    lodsb
+    and al,al
+    jz done
+    mov dl,al
+    mov ah,2
+    int 21h
+    jmp nextchar
+newline db 13,10,'$'
+done:
+    mov dx,offset newline
+    mov ah,9
+    int 21
+    jmp @@exit
 
 start16 endp
 
-make_int_gates proc
-    mov eax, edx
-    add eax, ebx
-    @stosw
-    mov ax,SEL_CODE64
-    @stosw
-    mov ax,si           ;int/trap gate
-    @stosd
-    xor eax, eax
-    @stosd
-    @stosd
-    loop make_int_gates
+;--- copy cx bytes to extended memory
+
+copy2ext proc
+    mov [si].EMM._size,ecx
+    push ecx
+    push bx
+    mov ah,0bh
+    call xmsaddr
+    pop bx
+    pop ecx
+    cmp ax,1
+    mov bp,CStr("error copying to extended memory.")
+    jnz @@error
+    add [si].EMM.dstofs,ecx
     ret
-make_int_gates endp
+copy2ext endp
 
-if ?IDT32
-;--- exception handlers for legacy protected-mode
+;--- read a section and copy it to extended memory
+;--- DI = 4 kB buffer
+;--- BX = file handle
+;--- sechdr = current section
 
-    assume ss:flat
+readsection proc
 
-excno = 0
-exc3200:
-    repeat 16+2
-    push excno
-    jmp @F
-    excno = excno+1
-    endm
+    mov eax, sechdr.VirtualAddress
+    add eax, adjust
+    add eax, ImgBase
+    sub eax, PhysBase
+    mov emm2.dstofs, eax
+
+    mov dx, word ptr sechdr.PointerToRawData+0
+    mov cx, word ptr sechdr.PointerToRawData+2
+    mov ax,4200h
+    int 21h
+    mov esi, sechdr.SizeOfRawData
+    .while esi
+        mov ecx,esi
+        cmp ecx,1000h
+        jb @F
+        mov cx,1000h
 @@:
-    mov dword ptr ss:[0B8000h],17201720h
-    pop eax
-    mov ah,al
-    shr ah,4
-    and ax,0F0Fh
-    or  ax,3030h
-    cmp al,3Ah
-    jb @F
-    add al,7
+        mov dx,di
+        mov ah,3Fh
+        int 21h
+        cmp ax,cx
+        mov bp, CStr("cannot read section data.")
+        jnz @@error
+        sub esi, ecx
+        push si
+        mov si,offset emm2
+        call copy2ext
+        pop si
+    .endw
+    ret
+readsection endp
+
+;--- switch back to real-mode and exit
+
+backtoreal proc
+
+    cli
+    mov ax,SEL_DATA16
+    mov ds,ax
+    mov es,ax
+    mov ss,ax
+    movzx esp,wStkBot
+    call resetpic
+
+    mov eax,cr0
+    and eax,7ffffffeh   ; disable protected-mode & paging
+    mov cr0,eax
+    jmp far16 ptr @F
 @@:
-    mov ss:[0b8000h],ah
-    mov ss:[0b8002h],al
-    hlt    ;interrupts are disabled, so just stop
-endif
+    mov ecx,0C0000080h  ; EFER MSR
+    rdmsr
+    btr eax,8           ; disable long mode (EFER.LME=0)
+    wrmsr
+
+    mov eax,cr4
+    btr eax,5           ; disable PAE paging
+    mov cr4,eax
+
+    mov ax, cs
+    mov ss, ax          ; SS=DGROUP
+    mov ds, ax          ; DS=DGROUP
+
+    @lidt [nullidt]     ; IDTR=real-mode compatible values
+    call restoreints
+@@exit::
+    sti
+    mov bx,fhandle
+    cmp bx,-1
+    jz @F
+    mov ah,3Eh
+    int 21h
+@@:
+    mov dx,xmshdl
+    cmp dx,-1
+    jz @F
+    mov ah,0dh          ;unlock handle
+    call xmsaddr
+    mov ah,0Ah          ;free EMB
+    mov dx,xmshdl
+    call xmsaddr
+@@:
+    cmp xmsaddr,0
+    jz @F
+    mov ah,6            ;local disable A20
+    call xmsaddr
+@@:
+    mov ax,4c00h
+    int 21h
+backtoreal endp
 
 ;--- call real-mode thru DPMI function ax=0x300, bl=intno, edi=RMCS
 
@@ -614,49 +577,39 @@ call_rmode proc
     mov dword ptr [esp].RMCS.regIP, ecx
     mov bx, wStkBot
     sub bx, 40h
-	sub wStkBot,(8+6+4+4)	;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
+    sub wStkBot,(8+6+4+4)   ;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
     cmp dword ptr [esp].RMCS.regSP,0
     jnz @F
     mov [esp].RMCS.regSP, bx
     mov [esp].RMCS.rSS,DGROUP
 @@:
-;--- disable paging
-    mov eax,cr0
-    btr eax,31
-    mov cr0, eax
+    mov ax,ds
+    mov ss,ax
+    movzx esp,bx
 
+;--- disable paging & protected-mode
+    mov eax,cr0
+    and eax,7ffffffeh
+    mov cr0, eax
+    jmp @F
+@@:
 ;--- disable long mode
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     btr eax,8
     wrmsr
 
-    mov ax,ds
-    mov ss,ax
-    movzx esp,bx
-
-;--- switch to real-mode, then back to prot-mode
-
-    mov eax,cr0
-    and al,0feh
-    mov cr0,eax
-    jmp far16 ptr @F	; set CS to a real-mode segm
-@@:
-    mov ax, cs          ; SS=real-mode seg
-    mov ss, ax
-    @lidt cs:[nullidt]  ; IDTR=real-mode compatible values
-    and byte ptr [esp].RMCS.rFlags+1,08Eh   ;reset IOPL, NT, TF
+    @lidt [nullidt]  ; IDTR=real-mode compatible values
     popad
-    popf
+    pop wFlags
     pop es
     pop ds
     pop fs
     pop gs
     pop dword ptr cs:[adjust]	;use this field temporarily
-    lss sp,ss:[esp]
-    pushf
-    cli
-    push cs
+    lss sp,[esp]
+    push cs:wFlags
+    push DGROUP
     push offset backtopm
     jmp dword ptr cs:[adjust]
 backtopm:
@@ -667,42 +620,22 @@ backtopm:
     push es
     pushf
     cli
-    @lgdt cs:[GDTR]     ; use 32-bit version of LGDT
     pushad
+    movzx esp,sp
+    add cs:wStkBot,(8+6+4+4)
+    @lgdt cs:[GDTR]     ; use 32-bit version of LGDT
+    @lidt cs:[IDTR]
 
-    pushf
-    and byte ptr [esp+1],8Eh	;reset NT,IOPL,TF
-    popf
-
-    mov eax,cr0
-    or al,1
-    mov cr0,eax         ;enable protected-mode again   
-    mov ax,SEL_DATA16
-    mov ds,ax
-    mov dx,DGROUP
-    movzx edx,dx
-    shl edx,4
-    add wStkBot,(8+6+4+4)
-    mov ax,SEL_FLAT
-    mov ss,ax
-    add esp, edx
-if 0
-    db 0eah
-    dw offset @F
-    dw SEL_CODE16
-@@:
-endif
-    @lidt [IDTR]
 ;--- (re)enable long mode
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     bts eax,8           ; set long mode
     wrmsr
 
-;--- (re)enable paging
+;--- enable protected-mode + paging
     mov eax,cr0
-    bts eax,31
-    mov cr0, eax
+    or eax,80000001h
+    mov cr0,eax
 
     db 66h,0eah         ; jmp far32
 llgofs2 dd offset back_to_long
@@ -710,129 +643,193 @@ llgofs2 dd offset back_to_long
 
 call_rmode endp
 
+;--- initialize interrupt gates in IDT 64-bit
+
+make_int_gates proc
+    mov eax, edx
+    add eax, ebx
+    stosw
+    mov ax,SEL_CODE64
+    stosw
+    mov ax,si           ;int/trap gate
+    stosd
+    xor eax, eax
+    stosd
+    stosd
+    loop make_int_gates
+    ret
+make_int_gates endp
+
 ;--- create IDT for long mode
-;--- EDI->free memory
+;--- DI->1 KB buffer
 ;--- EBX->linear address of stub start
-;--- ES=FLAT
 
 createIDT proc
 
-    push edi
-    mov ecx,32
+    push di
+    mov cx,32
     mov edx, offset exception
     add edx, ebx
 make_exc_gates:
     mov eax,edx
-    @stosw
+    stosw
     mov ax,SEL_CODE64
-    @stosw
+    stosw
     mov ax,8E00h
-    @stosd
+    stosd
     xor eax, eax
-    @stosd
-    @stosd
+    stosd
+    stosd
     add edx,4
     loop make_exc_gates
     mov ecx,256-32
     mov edx,offset swint
     mov si, 8F00h
     call make_int_gates
-    pop edi
+    pop di
 
-    push edi
-    push edi
-    lea edi,[edi+?MPIC*16]
+    push di
+    push di
+    lea di,[di+?MPIC*16]
     mov cx,8
     mov edx,offset Irq0007
     mov si, 8E00h
     call make_int_gates
-    pop edi
-    lea edi,[edi+?SPIC*16]
+    pop di
+    lea di,[di+?SPIC*16]
     mov cx,8
     mov edx,offset Irq080F
     call make_int_gates
-    pop edi
+    pop di
 
 ;--- setup IRQ0, Int21, Int31
 
     lea eax, [ebx+offset clock]
-    mov es:[edi+(?MPIC+0)*16+0],ax ; set IRQ 0 handler
+    mov [di+(?MPIC+0)*16+0],ax ; set IRQ 0 handler
     shr eax,16
-    mov es:[edi+(?MPIC+0)*16+6],ax
+    mov [di+(?MPIC+0)*16+6],ax
 
     lea eax,[ebx+offset int21]
-    mov es:[edi+21h*16+0],ax ; set int 21h handler
-;    mov word ptr es:[edi+21h*16+4],8F00h    ;change to trap gate
+    mov [di+21h*16+0],ax ; set int 21h handler
     shr eax,16
-    mov es:[edi+21h*16+6],ax
+    mov [di+21h*16+6],ax
 
     lea eax,[ebx+offset int31]
-    mov es:[edi+31h*16+0],ax ; set int 31h handler
+    mov [di+31h*16+0],ax ; set int 31h handler
     shr eax,16
-    mov es:[edi+31h*16+6],ax
+    mov [di+31h*16+6],ax
     ret
 
 createIDT endp
 
 ;--- setup page directories and tables
-;--- EDI -> free memory
-;--- ES=FLAT
+;--- DI -> 4 kB buffer
+;--- example: 1.5 TB -> 3 PML4E, 3*200 PDPTE, 600*200 PDE
+;--- cr3 = 4000
+;---   4000: PML4.0 = 5000+000*1000 = 5000
+;---   4008: PML4.1 = 5000+001*1000 = 6000
+;---   4010: PML4.2 = 5000+002*1000 = 7000
+;---   5000: PDPT.0   = 8000+000*1000 =   8000
+;---   6000: PDPT.200 = 8000+200*1000 = 208000
+;---   7000: PDPT.400 = 8000+400*1000 = 408000
+;---   7FF8: PDPT.5FF = 8000+5FF*1000 = 607000
+;---   8000: PD.0.0     =  00.00000000
+;--- 208000: PD.200.0   = 100.00000000
+;--- 408000: PD.400.0   = 200.00000000
+;--- 607FF8: PD.5FF.1FF = 2FF.FFE00000
 
 createPgTabs proc
 
-    mov cr3, edi    ; load page-map level-4 base
+    mov edx,PhysBase
+    mov cr3, edx    ; load page-map level-4 base
+    mov esi,1000h
+    xor ebx,ebx
+    add edx,esi
 
-    push edi
-    mov ecx,(1000h + ?PML4E*1000h)/4
-    sub eax,eax
-    @rep stosd       ; clear pages (PML4 & PDPT)
-    pop edi
-
-;--- DI+0    : PML4
-;--- DI+1000 : PDPT
-
-    lea eax,[edi+1000h]
-;    or eax,111b            ;set P,R/W,U
-    or eax,11b              ;set P,R/W,S
-
-    xor ecx, ecx
-    repeat ?PML4E
-    mov es:[edi+ecx],eax
-    add eax, 1000h
-    add ecx, 8
-    endm
-
-    add edi,1000h           ; let EDI point to PDPT
-    push edi
+    xor ecx,ecx
+;    or edx,111b            ;set P,R/W,U
+    or edx,11b              ;set P,R/W,S
+    mov cx,?PML4E           ; map PML4Es (default is 1)
+    call setuppage
+if ?PDPTE lt 10000h
     mov cx,?PDPTE           ; map PDPTEs (default is 64)
+else
+    mov ecx,?PDPTE          ; if 64 or more TB are to be mapped
+endif
+    call setuppages
+    mov ecx,?PDPTE*512      ; map PDEs (default is 64*512)
+    mov edx,80h+11b         ; set PS (bit 7 -> page size = 2 MB)
+;   mov esi,200000h
+    shl esi,9
+setuppages:
+    mov ebp,ecx
+    .while ebp
+        mov ecx,1000h/8
+        cmp ebp,ecx
+        jae @F
+        mov cx,bp
 @@:
-    mov es:[edi],eax        ; set PDPTE in PDPT (bits 30-37)
-    add eax, 1000h
-    add edi, 8
+        sub ebp,ecx
+        call setuppage
+    .endw
+    ret
+setuppage:
+    push di
+    mov ax,1000h/4
+    sub ax,cx
+    sub ax,cx
+    push ax
+@@:
+    mov eax,edx
+    stosd
+    mov eax,ebx
+    stosd
+    add edx, esi
+    adc ebx, 0
     loop @B
-    pop edi
-
-    add edi,?PML4E*1000h
-
-;--- map the first ?PDPTE GBs (64 * 512 * 2MB pages)
-
-    mov ecx,?PDPTE*512      ; number of PDE entries in PD
-    xor edx,edx
-    mov eax,80h+7h          ; set PS (bit 7 -> page size = 2 MB)
-@@:
-    mov es:[edi+0],eax      ; set PDE in PD (bits 21-29)
-    mov es:[edi+4],edx
-    add edi,8
-    add eax, 200000h
-    adc edx, 0
-    loopd @B
+    pop cx
+    xor eax,eax
+    rep stosd       ;clear the rest of the page
+    push si
+    push bp
+    mov si,offset emm2
+    mov cx,1000h
+    call copy2ext
+    pop bp
+    pop si
+    pop di
     ret
 createPgTabs endp
 
-;--- save the interrupt vectors that we will modify
-;--- DS=_TEXT,ES=FLAT
+;--- restore the interrupt vectors that we have modified
+;--- DS=DGROUP
 
-storeints proc
+restoreints proc
+    push 0
+    pop es
+if ?MPIC ne 8
+    mov cx,8
+    mov di,?MPIC*4
+    mov si,offset storedIntM
+    rep movsd
+endif
+if ?SPIC ne 70h
+    mov cx,8
+    mov di,?SPIC*4
+    mov si,offset storedIntS
+    rep movsd
+endif
+    ret
+restoreints endp
+
+;--- set the interrupt vectors that we will
+;--- use for IRQs while in long mode. This avoids
+;--- having to reprogram PICs for switches to real-mode
+;--- DS=DGROUP
+
+setints proc
+    push 0
+    pop es
 if ?MPIC ne 8
     mov cx,8
     mov bx,?MPIC*4
@@ -855,34 +852,6 @@ if ?SPIC ne 70h
     add di,4
     loop @B
 endif
-    ret
-storeints endp
-
-;--- restore the interrupt vectors that we have modified
-;--- DS=_TEXT,ES=FLAT
-
-restoreints proc
-if ?MPIC ne 8
-    mov cx,8
-    mov di,?MPIC*4
-    mov si,offset storedIntM
-    rep movsd
-endif
-if ?SPIC ne 70h
-    mov cx,8
-    mov di,?SPIC*4
-    mov si,offset storedIntS
-    rep movsd
-endif
-    ret
-restoreints endp
-
-;--- set the interrupt vectors that we will
-;--- use for IRQs while in long mode. This avoids
-;--- having to reprogram PICs for switches to real-mode
-;--- DS=_TEXT,ES=FLAT
-
-setints proc
     push ds
     push es
     pop ds
@@ -900,10 +869,11 @@ if ?SPIC ne 70h
 endif
     pop ds
     ret
+
 setints endp
 
 ;--- reprogram PIC
-;--- DS=_TEXT,ES=FLAT
+;--- DS=DGROUP
 
 setpic proc
 
@@ -944,9 +914,8 @@ endif
     ret
 setpic endp
 
-;--- reprogram PIC: change IRQ 0-7 to INT 08h-0Fh
-;--- ES=FLAT
-;--- DS=_TEXT
+;--- restore PIC: change IRQ 0-7 to INT 08h-0Fh
+;--- DS=DGROUP
 
 resetpic proc 
 
@@ -981,143 +950,6 @@ endif
     ret
 resetpic endp
 
-;--- switch back to real-mode and exit
-
-backtoreal proc
-    cli
-
-    mov ax,SEL_DATA16
-    mov ds,ax
-    mov ss,ax
-    movzx esp,wStkBot
-    mov ax,SEL_FLAT
-    mov es,ax
-    call resetpic
-    call restoreints
-
-    mov eax,cr0
-    btr eax,31          ; disable paging
-    mov cr0,eax
-
-    mov ecx,0C0000080h  ; EFER MSR
-    rdmsr
-    btr eax,8           ; disable long mode (EFER.LME=0)
-    wrmsr
-
-    mov eax,cr4
-    btr eax,5           ; disable PAE paging
-    mov cr4,eax
-
-    mov ax,SEL_DATA16   ; set SS, DS and ES to 16bit, 64k data
-    mov es,ax
-
-    mov eax,cr0         ; switch to real mode
-    btr eax, 0
-    mov cr0,eax
-    jmp far16 ptr @F
-@@:
-    mov ax, cs
-    mov ss, ax          ; SS=DGROUP
-    mov ds, ax          ; DS=DGROUP
-
-    @lidt [nullidt]     ; IDTR=real-mode compatible values
-
-exit::
-    mov bx,fhandle
-    cmp bx,-1
-    jz @F
-    mov ah,3Eh
-    int 21h
-@@:
-    mov dx,xmshdl
-    cmp dx,-1
-    jz @F
-    mov ah,0dh          ;unlock handle
-    call xmsaddr
-    mov ah,0Ah          ;free EMB
-    mov dx,xmshdl
-    call xmsaddr
-@@:
-    cmp xmsaddr,0
-    jz @F
-    mov ah,6            ;local disable A20
-    call xmsaddr
-@@:
-    sti
-    mov ax,4c00h
-    int 21h
-backtoreal endp
-
-;--- copy cx bytes to extended memory
-
-copy2x proc
-    mov [si].EMM._size,ecx
-    push ecx
-    push bx
-    mov ah,0bh
-    call xmsaddr
-    pop bx
-    pop ecx
-    cmp ax,1
-    jz @F
-    @errorexit "error copying to extended memory."
-@@:
-    add [si].EMM.dstofs,ecx
-    ret
-copy2x endp
-
-;--- read a section and copy it to extended memory
-;--- DI = 4 kB buffer
-;--- BX = file handle
-;--- sechdr = current section
-
-readsection proc
-    mov ax,4201h
-    xor cx,cx
-    xor dx,dx
-    int 21h
-    push dx
-    push ax
-
-    mov eax, sechdr.VirtualAddress
-    add eax, adjust
-	add eax, ImgBase
-	sub eax, PhysBase
-    mov emm2.dstofs, eax
-
-    mov eax, sechdr.PointerToRawData
-    push eax
-    pop dx
-    pop cx
-    mov ax,4200h
-    int 21h
-    mov esi, sechdr.SizeOfRawData
-    .while esi
-        mov ecx,esi
-        cmp ecx,1000h
-        jb @F
-        mov cx,1000h
-@@:
-        mov dx,di
-        mov ah,3Fh
-        int 21h
-        cmp ax,cx
-        jz @F
-        @errorexit "cannot read section data."
-@@:
-        sub esi, ecx
-        push si
-        mov si,offset emm2
-        call copy2x
-        pop si
-    .endw
-    pop dx
-    pop cx
-    mov ax,4200h
-    int 21h
-    ret
-readsection endp
-
 ;--- here's the 64bit code segment.
 ;--- since 64bit code is always flat but the DOS mz format is segmented,
 ;--- there are restrictions - because the assembler doesn't know the
@@ -1132,30 +964,75 @@ _TEXT64 segment para use64 public 'CODE'
     assume ds:FLAT, es:FLAT, ss:FLAT
 
 long_start proc
-    mov esp,ecx		; this also clears high32 of rsp
-    sti             ; now interrupts can be used
-    mov esi,esi     ; clear high32 of rsi
+
+;--- ensure ss is valid
+    xor eax,eax
+    mov ss,eax
+
+;--- linear address of image start (=PE header) should be in ebx
+
+    mov ebx,ebx     ; clear high32 of rbx
+    mov ecx,[rbx].IMAGE_NT_HEADERS.OptionalHeader.SizeOfImage
+    add rcx,[rbx].IMAGE_NT_HEADERS.OptionalHeader.SizeOfStackReserve
+    add rcx,rbx
+    mov rsp,rcx
+    sti             ; stack ok, interrupts can be used
+    call baserelocs	; handle base relocations
+
+    mov esi,[rbx].IMAGE_NT_HEADERS.OptionalHeader.AddressOfEntryPoint
+    add rsi,rbx
     call rsi
     mov ah,4Ch
     int 21h
 long_start endp
 
+;--- handle base relocs of PE image
+
+baserelocs proc
+    mov esi, [rbx].IMAGE_NT_HEADERS.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC*sizeof IMAGE_DATA_DIRECTORY].VirtualAddress
+    mov ecx, [rbx].IMAGE_NT_HEADERS.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC*sizeof IMAGE_DATA_DIRECTORY].Size_
+    mov rdx, rbx
+    sub rdx, [rbx].IMAGE_NT_HEADERS.OptionalHeader.ImageBase
+    add esi, ebx    ;RVA->linear
+    add ecx, esi    ;ecx=end of relocs (linear)
+nextpage:
+    cmp esi, ecx
+    jnc reloc_done
+    push rcx
+    lodsd           ;get RVA of page
+    lea edi, [rax+rbx]  ;convert RVA to linear address
+    lodsd
+    lea ecx, [rsi+rax-8];ecx=end of relocs for this page
+    xor eax, eax
+nextreloc:
+    lodsw
+    test ah,0F0h        ;must be < 1000h (size of a page)
+    jz ignreloc
+    and ah,0Fh			;usually it's type 0A (dir64)
+    add [rax+rdi], edx
+ignreloc:
+    cmp esi, ecx
+    jb nextreloc
+    pop rcx
+    jmp nextpage
+reloc_done:
+    ret
+baserelocs endp
+
 ;--- low level screen output for default exception handlers
 
 WriteChr proc
     push rdx
-    push rax
-	cmp al,10
-	jnz @F
-	mov dl,13
-	mov ah,2
-	int 21h
-	mov al,10
+    cmp al,10
+    jnz @F
+    mov dl,13
+    mov ah,2
+    int 21h
+    mov al,10
 @@:
     mov dl,al
     mov ah,2
     int 21h
-    pop rax
     pop rdx
     RET
 WriteChr endp
@@ -1168,7 +1045,7 @@ WriteStrX proc  ;write string at rip
     lodsb
     and al,al
     jz @F
-	call WriteChr
+    call WriteChr
     jmp @B
 @@:
     mov [rsp+8],rsi
@@ -1203,9 +1080,10 @@ WriteNb:
     jbe @F
     add al,7
 @@:
-	jmp WriteChr
+    jmp WriteChr
 
 ;--- exception handler
+;--- might not work for exception 0Ch, since stack isn't switched.
 
 exception:
 excno = 0
@@ -1225,8 +1103,7 @@ excno = 0
     call WriteQW
     call WriteStrX
     db " imagebase=",0
-    mov ax,DGROUP
-    movzx eax,ax
+    mov eax,DGROUP
     shl eax,4
     mov eax,dword ptr [eax+ImgBase]
     call WriteDW
@@ -1242,48 +1119,27 @@ if 0
 endif
     call WriteStrX
     db 10,"[rsp]=",0
-    mov rax,[rsp+0]
+    xor ecx,ecx
+@@:
+    mov rax,[rsp+rcx*8]
     call WriteQW
     mov al,' '
     call WriteChr
-    mov rax,[rsp+8]
-    call WriteQW
-    mov al,' '
-    call WriteChr
-    mov rax,[rsp+16]
-    call WriteQW
-    mov al,' '
-    call WriteChr
-    mov rax,[rsp+24]
-    call WriteQW
-    mov al,' '
-    call WriteChr
-    mov rax,[rsp+32]
-    call WriteQW
-
+    inc ecx
+    cmp ecx,4
+    jnz @B
     call WriteStrX
     db 10,"      ",0
-    mov rax,[rsp+40]
+@@:
+    mov rax,[rsp+rcx*8]
     call WriteQW
     mov al,' '
     call WriteChr
-    mov rax,[rsp+48]
-    call WriteQW
-    mov al,' '
-    call WriteChr
-    mov rax,[rsp+56]
-    call WriteQW
-    mov al,' '
-    call WriteChr
-    mov rax,[rsp+64]
-    call WriteQW
-    mov al,' '
-    call WriteChr
-    mov rax,[rsp+72]
-    call WriteQW
+    inc ecx
+    cmp ecx,8
+    jnz @B
     mov al,10
     call WriteChr
-    sti
     mov ax,4cffh
     int 21h
 
@@ -1296,6 +1152,14 @@ clock:
     pop rbp
 Irq0007:
     push rax
+if 1
+    mov al,0Bh	;check if keyboard data is to be read
+    out 20h,al
+    in al,20h
+    test al,2
+    jz Irq0007_1
+    in al,60h
+endif
 Irq0007_1:
     mov al,20h
     out 20h,al
@@ -1334,9 +1198,9 @@ int21 proc
     mov [rsp].RMCS.rEDX, edx
     mov [rsp].RMCS.rECX, ecx
     mov [rsp].RMCS.rEAX, eax
-    mov word ptr [rsp].RMCS.rFlags, 0002h
-    mov word ptr [rsp].RMCS.rDS, STACK
-    mov word ptr [rsp].RMCS.rES, STACK
+    mov [rsp].RMCS.rFlags, 0202h
+    mov [rsp].RMCS.rDS, STACK
+    mov [rsp].RMCS.rES, STACK
     mov dword ptr [rsp].RMCS.regSP, 0
     push rdi
     lea rdi,[rsp+8]
@@ -1369,13 +1233,15 @@ pback_to_real label ptr far16
 int21 endp
 
 int31 proc
-    cmp ax,0300h
+    and byte ptr [rsp+2*8],0FEh	;clear carry flag
+    cmp ax,0300h	;simulate real-mode interrupt?
     jz int31_300
+    cmp ax,0205h	;set exception vector?
+    jz int31_205
 ret_with_carry:
     or byte ptr [rsp+2*8],1 ;set carry flag
     iretq
 int31_300:
-    and byte ptr [rsp+2*8],0FEh	;clear carry flag
     push rax
     push rcx
     push rdx
@@ -1390,13 +1256,13 @@ int31_300:
 ;--- the DGROUP stack, additionally save value or RSP
 ;--- there at offset 38h.
 
-    mov ax,DGROUP
-    movzx eax,ax
+    mov eax,DGROUP
     shl eax,4
     movzx edi,word ptr [eax+offset wStkBot] 
     lea edi,[edi+eax-40h]
     mov [edi+38h],rsp
     mov esp,edi
+    cld
     movsq   ;copy 32h bytes, the full RMCS struct
     movsq
     movsq
@@ -1409,8 +1275,13 @@ pcall_rmode label ptr far16
     dw offset call_rmode
     dw SEL_CODE16
 back_to_long::
-    mov esi,esp
-    mov rsp,[esp+38h]
+
+    xor eax,eax
+    mov ss,eax
+    mov edx,DGROUP
+    shl edx,4
+    lea esi,[esp+edx]
+    mov rsp,[esi+38h]
     mov rdi,[rsp]
     cld
     movsq   ;copy 2Ah bytes back, don't copy CS:IP & SS:SP fields
@@ -1425,6 +1296,30 @@ back_to_long::
     pop rbx
     pop rdx
     pop rcx
+    pop rax
+    iretq
+int31_205:
+    cmp bl,20h
+    jae ret_with_carry
+    push rax
+    push rdi
+    sub rsp,16
+    sidt [rsp]
+    mov rdi,[rsp+2]
+    add rsp,16
+    movzx eax,bl
+    shl eax,4
+    add rdi,rax
+    mov rax,rdx
+    cld
+    stosw
+    mov ax,cx
+    stosw
+    mov ax,8E00h
+    stosd           ;+store highword edx!
+    shr rax,32
+    stosd
+    pop rdi
     pop rax
     iretq
 int31 endp

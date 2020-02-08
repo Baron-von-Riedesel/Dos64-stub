@@ -1,9 +1,16 @@
 
-    5.2.2020:
+   8.2.2020:
+   - paging tables and IDT located now before the image, so a heap
+     may be initialized above the stack.
+   - paging tables setup now done in real-mode to minimize interrupt
+     disabled time.
+   - keyboard read if interrupt request of keyboard so it won't stop.
+
+   5.2.2020:
    - no restriction for value of RSP anymore when int 21h is called.
    - transfer flags bits 0-7 from real-mode DOS to 64-bit.
    - sample in C added (TestC.c).
-   - Win64 compatible printf.asm added, used by TestC
+   - Win64 compatible printf.asm added, used by TestC.
 
    30.1.2020:
    - carry flag of real-mode DOS call wasn't transfered to 64-bit.

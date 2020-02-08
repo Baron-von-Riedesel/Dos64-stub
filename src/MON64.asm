@@ -209,6 +209,9 @@ r_cmd proc
     invoke printf, CStr(<"r10=%16lX  r11=%16lX",lf>), r10, r11
     invoke printf, CStr(<"r12=%16lX  r13=%16lX",lf>), r12, r13
     invoke printf, CStr(<"r14=%16lX  r15=%16lX",lf>), r14, r15
+    pushfq
+    pop rax
+    invoke printf, CStr(<"flags=%14lX",lf>), rax
     ret
 r_cmd endp
 
@@ -348,35 +351,14 @@ q_cmd endp
 
 set_exception_handlers proc
 
-    sub rsp,16
-    sidt [rsp]
-    mov rdi,[rsp+2]
-    add rsp,16
-    cld
-    lea rdi,[rdi+0Dh*10h]
-
+    mov bl,0Dh
     lea rdx, exception0D
-    mov eax,edx
-    stosw
-    mov ax, cs
-    stosw
-    mov ax,8E00h
-    stosd           ;store type + highword offset
-    xor eax, eax
-    stosd
-    stosd
-
+    mov ecx,cs
+    mov ax,0205h
+    int 31h
+    mov bl,0Eh
     lea rdx, exception0E
-    mov eax,edx
-    stosw
-    mov ax, cs
-    stosw
-    mov ax,8E00h
-    stosd           ;store type + highword offset
-    xor eax, eax
-    stosd
-    stosd
-
+    int 31h
     ret
 set_exception_handlers endp
 

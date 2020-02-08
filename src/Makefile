@@ -10,7 +10,7 @@ $(ODIR):
 	@mkdir $(ODIR)
 
 $(ODIR)\mon64.exe: $(ODIR)\dos64stb.bin $(ODIR)\mon64.obj
-	link /subsystem:native $*.obj /stub:$(ODIR)\dos64stb.bin /stack:0x4000 /heap:0 /out:$*.exe
+	link /subsystem:native $*.obj /stub:$(ODIR)\dos64stb.bin /stack:0x4000 /heap:0 /out:$*.exe /map
 #	@jwlink format win pe ru native f $* n $* op q,m=$*,stub=$(ODIR)\dos64stb.bin,stack=0x4000,heap=0x1000
 
 $(ODIR)\mon64.obj: mon64.asm

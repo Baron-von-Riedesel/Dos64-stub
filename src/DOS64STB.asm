@@ -394,7 +394,15 @@ memsizeok:
     int 21h
     mov fhandle,-1
 
-;--- the extended memory block has been setup with page tabs, IDT and image
+;--- done setup the extended memory block;
+;--- page tabs, IDT and image are initialized.
+
+;--- disable int 23h termination (myint23)
+;--- or exit program (@@exit2)
+;    mov dx,offset myint23
+    mov dx,offset @@exit2
+    mov ax,2523h
+    int 21h
 
     call setints
 
@@ -439,7 +447,8 @@ done:
     mov ah,9
     int 21
     jmp @@exit
-
+myint23:
+    iret
 start16 endp
 
 ;--- copy cx bytes to extended memory
@@ -508,27 +517,27 @@ backtoreal proc
     mov es,ax
     mov ss,ax
     movzx esp,wStkBot
-    call resetpic
 
     mov eax,cr0
     and eax,7ffffffeh   ; disable protected-mode & paging
     mov cr0,eax
     jmp far16 ptr @F
 @@:
+    @lidt [nullidt]     ; IDTR=real-mode compatible values
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     and ah,0feh         ; disable long mode (EFER.LME=0)
     wrmsr
+@@exit2::
+    mov ax, cs
+    mov ss, ax          ; SS=DGROUP
+    mov ds, ax          ; DS=DGROUP
 
     mov eax,cr4
     and al,0DFh         ; reset bit 5, disable PAE paging
     mov cr4,eax
 
-    mov ax, cs
-    mov ss, ax          ; SS=DGROUP
-    mov ds, ax          ; DS=DGROUP
-
-    @lidt [nullidt]     ; IDTR=real-mode compatible values
+    call resetpic
     call restoreints
 @@exit::
     sti
@@ -1231,8 +1240,8 @@ int31 proc
     and byte ptr [rsp+2*8],0FEh	;clear carry flag
     cmp ax,0300h	;simulate real-mode interrupt?
     jz int31_300
-    cmp ax,0205h	;set exception vector?
-    jz int31_205
+    cmp ax,0203h	;set exception vector?
+    jz int31_203
 ret_with_carry:
     or byte ptr [rsp+2*8],1 ;set carry flag
     iretq
@@ -1293,7 +1302,7 @@ back_to_long::
     pop rcx
     pop rax
     iretq
-int31_205:
+int31_203:
     cmp bl,20h
     jae ret_with_carry
     push rax

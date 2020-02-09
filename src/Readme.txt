@@ -50,7 +50,7 @@
   dos64stb installs a tiny subset of the DPMI API. The functions that are
   supported are:
    - int 21h, ah=4Ch: terminate program
-   - int 31h, ax=205h: set exception vector BL to CX:RDX
+   - int 31h, ax=203h: set exception vector BL to CX:RDX
    - int 31h, ax=300h: simulate real-mode interrupt BL, RDI=real-mode call
      structure.
   

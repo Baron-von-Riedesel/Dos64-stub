@@ -44,8 +44,8 @@ lbuffer equ $ - offset buffer
 
 main proc
 
-    call set_exception_handlers
     invoke printf, CStr(<lf,"Mon64 loaded at %lX, rsp=%lX",lf>), rbx, rsp
+    call set_exception_handlers
 nextcmd:
     invoke printf, CStr(<"(cmds: a,c,d,q,r,s or x): ">)
     mov ah,1        ;read a key from keyboard with echo
@@ -354,7 +354,7 @@ set_exception_handlers proc
     mov bl,0Dh
     lea rdx, exception0D
     mov ecx,cs
-    mov ax,0205h
+    mov ax,0203h
     int 31h
     mov bl,0Eh
     lea rdx, exception0E

@@ -1,10 +1,12 @@
 
-   8.2.2020:
+   9.2.2020:
    - paging tables and IDT located now before the image, so a heap
      may be initialized above the stack.
    - paging tables setup now done in real-mode to minimize interrupt
      disabled time.
    - keyboard read if interrupt request of keyboard so it won't stop.
+   - added DPMI function ax=203h (set exception vector).
+   - ensure Ctrl-C will exit the program in a safe state.
 
    5.2.2020:
    - no restriction for value of RSP anymore when int 21h is called.

@@ -516,7 +516,7 @@ backtoreal proc
     mov ds,ax
     mov es,ax
     mov ss,ax
-    movzx esp,wStkBot
+    mov sp,wStkBot
 
     mov eax,cr0
     and eax,7ffffffeh   ; disable protected-mode & paging
@@ -578,7 +578,7 @@ call_rmode proc
     mov es, ax
     shl bx,2
     mov ecx,ss:[bx]
-    mov dword ptr [esp].RMCS.regIP, ecx
+    mov [adjust], ecx       ;use the adjust var to temporarily store CS:IP
     mov bx, wStkBot
     sub bx, 40h
     sub wStkBot,(8+6+4+4)   ;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
@@ -589,7 +589,7 @@ call_rmode proc
 @@:
     mov ax,ds
     mov ss,ax
-    movzx esp,bx
+    movzx esp,bx	;clear highword ESP, [ESP] is used below!
 
 ;--- disable paging & protected-mode
     mov eax,cr0
@@ -610,8 +610,7 @@ call_rmode proc
     pop ds
     pop fs
     pop gs
-    pop dword ptr cs:[adjust]	;use this field temporarily
-    lss sp,[esp]
+    lss sp,[esp+4]
     push cs:wFlags
     push DGROUP
     push offset backtopm
@@ -1279,13 +1278,13 @@ pcall_rmode label ptr far16
     dw offset call_rmode
     dw SEL_CODE16
 back_to_long::
-
-    xor eax,eax
-    mov ss,eax
     mov edx,DGROUP
     shl edx,4
     lea esi,[esp+edx]
+    xor eax,eax
+    mov ss,eax
     mov rsp,[esi+38h]
+    sti
     mov rdi,[rsp]
     cld
     movsq   ;copy 2Ah bytes back, don't copy CS:IP & SS:SP fields

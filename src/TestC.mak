@@ -2,7 +2,7 @@
 # NMake makefile, makes TestC.exe
 # needs JWasm and MSVC 64-bit
 
-ODIR=Release
+ODIR=..\build
 
 all: $(ODIR) $(ODIR)\TestC.exe
 

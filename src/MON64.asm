@@ -100,28 +100,55 @@ c_cmd proc
     ret
 c_cmd endp
 
-;--- enter address (for d cmd)
+;--- get a line of characters
+;--- rbx->buffer
+;--- esi=size of buffer
 
-a_cmd proc
-    invoke printf, CStr(<"enter start address for d cmd: ">)
-    mov rdi, 0
-    lea rbx, buffer
+getline proc
+    xor edi, edi
+    dec esi
 nextkey:
     mov ah,1
     int 21h
     cmp al,0dh
     jz enter_pressed
+    cmp al,08h
+    jz backspace_pressed
     mov [rbx+rdi],al
-    inc rdi
-    cmp rdi,lbuffer-1
+    inc edi
+    cmp edi,esi
     jnz nextkey
-    invoke printf,CStr(lf)
+    mov dl,0dh
+    mov ah,2
+    int 21h
+    jmp enter_pressed
+backspace_pressed:
+    mov dl,20h
+    mov ah,2
+    int 21h
+    cmp edi,0
+    jz nextkey
+    dec edi
+    mov dl,08h
+    mov ah,2
+    int 21h
+    jmp nextkey
 enter_pressed:    
+    mov byte ptr [rbx+rdi],0
+    ret
+getline endp
+
+;--- enter address (for d cmd)
+
+a_cmd proc
+    invoke printf, CStr(<"enter start address for d cmd: ">)
+    lea rbx, buffer
+    mov esi, lbuffer
+    call getline
     and edi,edi        ;at least 1 digit entered?
     jz done
-    mov byte ptr [rbx+rdi],0
     xor edi,edi
-    xor rsi,rsi
+    xor esi,esi
     .while byte ptr [rbx+rdi]
         mov al,byte ptr [rbx+rdi]
         sub al,'0'
@@ -143,13 +170,12 @@ enter_pressed:
     jz @F
     invoke printf, CStr(<"hint: magnitude of address > 48 bits, exceeds paging capacity",lf>)
 @@:
-    mov [address],rsi
+    mov address,rsi
 done:
     invoke printf, CStr(lf)
     ret
 error:
-    lea rsi, [buffer]
-    invoke printf, CStr(<lf,"%s?",lf>), rsi
+    invoke printf, CStr(<lf,"%s?",lf>), addr buffer
     ret
 
 a_cmd endp

@@ -2,7 +2,7 @@
 # NMake makefile, makes dos64stb.bin and mon64.exe
 # needs JWasm and a 64-bit linker (MS link used here).
 
-ODIR=Release
+ODIR=..\build
 
 all: $(ODIR) $(ODIR)\mon64.exe
 

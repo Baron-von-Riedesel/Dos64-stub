@@ -1,12 +1,15 @@
 
+   17.2.2020:
+   - created a second variant of Dos64stb, name Dos64stb2.
+
    9.2.2020:
    - paging tables and IDT located now before the image, so a heap
      may be initialized above the stack.
    - paging tables setup now done in real-mode to minimize interrupt
      disabled time.
-   - keyboard read if interrupt request of keyboard so it won't stop.
+   - keyboard read when interrupt request of keyboard so it won't stop.
    - added DPMI function ax=203h (set exception vector).
-   - ensure Ctrl-C will exit the program in a safe state.
+   - ensured that Ctrl-C will do a clean exit.
 
    5.2.2020:
    - no restriction for value of RSP anymore when int 21h is called.

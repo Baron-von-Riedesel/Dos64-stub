@@ -10,8 +10,13 @@
     .x64
     .model flat
     option casemap:none
+    option proc:private
 
 lf  equ 10 
+
+ifdef ?PE
+%   include ?lnkdef		;for option -pe
+endif
 
 ;--- define a string
 CStr macro text:vararg
@@ -24,13 +29,11 @@ sym db text,0
     exitm <addr sym>	;works since jwasm v2.13
 endm
 
-    .data
-
-qwRsp   dq 0    ;stack pointer
-address dq 0    ;next address for d-cmd
-
+    .data?
+qwRsp   dq ?    ;stack pointer
+address dq ?    ;next address for d-cmd
 ;--- keyboard buffer
-buffer db 20 dup (0)
+buffer db 20 dup (?)
 lbuffer equ $ - offset buffer
 
     .code
@@ -46,6 +49,7 @@ main proc
 
     invoke printf, CStr(<lf,"Mon64 loaded at %lX, rsp=%lX",lf>), rbx, rsp
     call set_exception_handlers
+    mov address,0
 nextcmd:
     invoke printf, CStr(<"(cmds: a,c,d,q,r,s or x): ">)
     mov ah,1        ;read a key from keyboard with echo
@@ -68,6 +72,8 @@ nextcmd:
     jz r_cmd
     cmp al,'s'
     jz s_cmd
+    cmp al,'v'
+    jz v_cmd
     cmp al,'x'
     jz x_cmd
     cmp al,0dh      ;ENTER?
@@ -300,6 +306,13 @@ s_cmd proc
     add rsp,16
     ret
 s_cmd endp
+
+;--- for various testings
+
+v_cmd proc
+    vzeroall
+    ret
+v_cmd endp
 
 ;--- display xmm registers
 

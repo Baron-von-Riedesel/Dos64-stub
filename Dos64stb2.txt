@@ -1,0 +1,15 @@
+
+  What is Dos64stb2?
+
+  Dos64stb2 is a variant of Dos64stb. In most aspects it behaves like
+  Dos64stb, with the following differences:
+
+   - it doesn't require the image to contain base relocations, because
+     it is able to load the image at its prefered loading address.
+   - it does not map the full physical memory in the page tables, but
+     just the memory that the image "owns" ( + the conventional memory
+     0-fffffh ). Also, it doesn't use 2 MB pages, but just the standard
+     4 kB pages.
+   - the image base address is not restricted to be < 100000000h.
+   - the IDT is mapped at linear address 100000h, just above conventional
+     memory.

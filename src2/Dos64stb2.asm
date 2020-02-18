@@ -50,6 +50,11 @@ endm
     lidt addr
 endm
 
+@rep macro cmd
+    db 67h
+    rep cmd
+endm
+
 @wait macro         ;for debugging only
 local lbl1
 ;    push ax
@@ -275,30 +280,27 @@ start16 proc
 ;---         (ImgSize+1) / (512*512*512) pages for PDPT (1 PDPT maps 512 GB)
 ;---         1 page for PML4
 
-	inc edx		;add the page for IDT
+    inc edx     ;add the page for IDT
 
-	mov eax,edx
-	shr eax,9
-	inc eax		;eax = pages for PTs
-	add edx,eax
+    mov eax,edx
+    shr eax,9   ;eax = pages for PTs
+    add edx,eax
+    shr eax,9
+    add edx,eax ;eax = pages for PDs
+    shr eax,9   ;eax = pages for PDPTs
+    add edx,eax
+;--- additional pages needed
+;--- 3 for remainder of PDPT,PD,PT
+;--- 1 for PML4
+;--- 3 (PT,PD,PDPT) for mapping DOS conventional memory
+;--- 1 extra page that may be needed to align to page boundary
+    add edx,3+1+3+1
 
-	mov eax,edx
-	shr eax,9+9
-	inc eax		;eax = pages for PDs
-	add edx,eax
-
-	mov eax,edx
-	shr eax,9+9+9
-	inc eax		;eax = pages for PDPTs
-	add edx,eax
-
-	inc edx		;add the page for PML4
-	inc edx		;1 extra page that may be needed to align to page boundary
-
-	test edx,0C0000000h
+    test edx,0C0000000h
     mov bp,CStr("too much extended memory needed")
     jnz @@error
-	shl edx,2
+    push edx
+    shl edx,2
 
 ;--- allocate the extended memory block needed for image + systabs
     mov ah,89h
@@ -316,7 +318,15 @@ start16 proc
     jnz @@error
     push dx
     push bx
-    pop ebx
+
+;--- clear the whole block
+    call EnableUnreal
+    pop ebx ;get base
+    pop ecx ;get size (in pages)
+    mov edi,ebx
+    shl ecx,10  ;pages to dword
+    xor eax,eax
+    @rep stosd
 
 ;--- align to page boundary
 
@@ -338,10 +348,6 @@ start16 proc
     mov word ptr emm2.srcofs+0, sp
     mov word ptr emm2.srcofs+2, ss
 
-    mov di,sp
-    push ds
-    pop es
-
 ;---  map conventional memory
     invoke MapPages, 256, 0, 0
 
@@ -354,32 +360,34 @@ start16 proc
 
 ;--- init IDT
 
+    mov di,sp
+    push ds
+    pop es
     call createIDT
 
     mov eax,PhysCurr
+    add PhysCurr,1000h
+    push eax
     sub eax,PhysBase
     add eax,adjust
     mov emm2.dstofs, eax
     mov ecx, 1000h		;copy IDT to ext memory
     mov si, offset emm2
     call copy2ext
-
+    pop ecx
 ;--- map IDT at 0x100000h
-    mov ecx, PhysCurr
-    add PhysCurr,1000h
     mov eax, 100000h
     mov dword ptr [IDTR+2], eax
     invoke MapPages, 1, 100000h, ecx
 
     mov eax,PhysCurr
+    mov ecx,ImgSize
+    shl ecx,12
+    add PhysCurr, ecx
     mov ImgBase, eax
     sub eax, PhysBase
     add eax, adjust
     mov emm.dstofs, eax
-
-    mov eax,ImgSize
-    shl eax,12
-    add PhysCurr, eax
 
     mov ecx, sizeof IMAGE_NT_HEADERS
     mov si, offset emm
@@ -417,9 +425,20 @@ start16 proc
 
     add sp,4096
 
-;--- create address space for image
+;--- check that image base is either 
+;--- in range 0-7fffffffffffh
+;--- or in range ffff800000000000h-ffffffffffffffffh.
 
+    mov bp,CStr("Cannot map image; check image base!")
+    mov eax,dword ptr nthdr.OptionalHeader.ImageBase+4
+    shr eax,15
+    jz @F
+    cmp eax,1ffffh
+    jnz @@error
+@@:
+;--- create address space for image
     invoke MapPages, ImgSize, nthdr.OptionalHeader.ImageBase, ImgBase
+    jc @@error
 
     mov ah,3Eh
     int 21h
@@ -487,27 +506,18 @@ myint23:
     iret
 start16 endp
 
-@rep macro cmd
-    db 67h
-    rep cmd
-endm
-
 ;--- create address space and map pages
 ;--- linaddr: start linear address space to create
 ;--- physaddr: start physical block to map
 ;--- pages: no of pages to map
 
-MapPages proc stdcall uses es di pages:dword, linaddr:qword, physaddr:dword
+MapPages proc stdcall uses es pages:dword, linaddr:qword, physaddr:dword
 
     call EnableUnreal
     .if (pPML4 == 0)
         mov eax,PhysCurr
-        mov pPML4,eax
         add PhysCurr,1000h
-        mov edi,eax      ;init PML4
-        xor eax,eax
-        mov ecx,1000h/4
-        @rep stosd
+        mov pPML4,eax      ;set PML4
     .endif
     .while pages
         mov eax,dword ptr linaddr+0
@@ -518,21 +528,32 @@ MapPages proc stdcall uses es di pages:dword, linaddr:qword, physaddr:dword
         shr edx,9
         push eax
         loop @B
-        shr eax,9
+        shr eax,9           
+;--- eax contains now bits 36-63 of linaddr (28 bits)
+;--- valid are the lower 12 bits (36-47)
+;--- bits 47-63 must be identical ( bits 0ffff800 )
         and eax,0ff8h
         mov cx,3
         mov ebx,pPML4
 @@:
         mov esi,es:[ebx+eax]
-        .if (esi == 0)
-            call initpgtab   ;init PDPT,PD,PT
+        .if (esi == 0)             ;does PDPTE/PDE/PTE exist?
+            mov esi,PhysCurr
+            add PhysCurr,1000h
+            or si,11b
+            mov es:[ebx+eax],esi
+;           mov es:[ebx+eax+4],x   ;if phys ram > 4 GB is used
         .endif
         pop eax
         and eax,0ff8h
         mov ebx,esi
-        and bx,0FC00h
+;       and bx,0FC00h
+        and bx,0F000h
         loop @B
 
+        test byte ptr es:[ebx+eax],1     ;something already mapped there?
+        stc
+        jnz exit
         mov edx,physaddr
         add physaddr,1000h
         or dl,11b
@@ -542,23 +563,10 @@ MapPages proc stdcall uses es di pages:dword, linaddr:qword, physaddr:dword
         adc dword ptr linaddr+4,0
         dec pages
     .endw
+    clc
+exit:
     ret
 
-;--- allocate a physical page, store it
-;--- in the current PT/PD/PDPT and clear it.
-initpgtab:
-    mov esi,PhysCurr
-    add PhysCurr,1000h
-    mov edi,esi
-    mov es:[ebx+eax],esi
-    or byte ptr es:[ebx+eax],11b
-;    mov es:[ebx+eax+4],x   ;if phys ram > 4 GB is used
-    xor eax,eax
-    push cx
-    mov ecx,1000h/4
-    @rep stosd
-    pop cx
-    retn
 MapPages endp
 
 EnableUnreal proc
@@ -576,7 +584,7 @@ EnableUnreal proc
     jmp @F
 @@:
     sti
-    mov ax,0
+    xor ax,ax
     mov es,ax
     ret
 EnableUnreal endp
@@ -1033,9 +1041,8 @@ long_start proc
 
     mov ecx,[rbx].IMAGE_NT_HEADERS.OptionalHeader.SizeOfImage
     add rcx,[rbx].IMAGE_NT_HEADERS.OptionalHeader.SizeOfStackReserve
-    add rcx,rbx
-    mov rsp,rcx
-    sti             ; stack ok, interrupts can be used
+    lea rsp,[rcx+rbx]
+    sti             ; stack pointer ok, interrupts can be used
 
 ;   call baserelocs	; handle base relocations
 
@@ -1082,7 +1089,7 @@ baserelocs endp
 
 endif
 
-;--- low level screen output for default exception handlers
+;--- screen output for default exception handlers
 
 WriteChr proc
     push rdx

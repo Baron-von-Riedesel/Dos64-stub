@@ -425,9 +425,14 @@ start16 proc
 
     add sp,4096
 
+    mov ah,3Eh
+    int 21h
+    mov fhandle,-1
+
 ;--- check that image base is either 
 ;--- in range 0-7fffffffffffh
 ;--- or in range ffff800000000000h-ffffffffffffffffh.
+;--- then create address space for image.
 
     mov bp,CStr("Cannot map image; check image base!")
     mov eax,dword ptr nthdr.OptionalHeader.ImageBase+4
@@ -436,13 +441,8 @@ start16 proc
     cmp eax,1ffffh
     jnz @@error
 @@:
-;--- create address space for image
     invoke MapPages, ImgSize, nthdr.OptionalHeader.ImageBase, ImgBase
     jc @@error
-
-    mov ah,3Eh
-    int 21h
-    mov fhandle,-1
 
 ;--- done setup the extended memory block;
 ;--- page tabs, IDT and image are initialized.

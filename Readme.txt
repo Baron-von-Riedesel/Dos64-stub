@@ -8,15 +8,15 @@
 
    - check if the cpu is 64-bit
    - check if the PE image is "acceptable"
-   - check if enough XMS memory is available to load the image
-   - load the image into extended memory
-   - setup GDT and switch to protected-mode
-   - handle relocation info ( the image MUST contain base relocations )
+   - check if enough XMS memory is available for image & paging
    - setup IDT and page tables for 64-bit PAE paging
-   - install a small "OS" (int 21h/31h) that allows the image to call
+   - read & move the image into extended memory
+   - install a small "OS" (int 21h/31h) so one may call
      real-mode DOS functions that don't need pointer translation.
    - reprogram master PIC, so IRQs 00h-07h are mapped to Int 78h-7fh
-   - enable paging; call the entry point of the loaded 64-bit image
+   - switch to long-mode
+   - handle base relocations
+   - call the entry point of the loaded 64-bit image
 
 
   2. Requirements
@@ -29,14 +29,14 @@
    - enough extended memory to load the image
 
 
-  3. Hot to use dos64stub?
+  3. How to use dos64stub?
 
   The stub is added to a 64-bit binary thru the link step. See file
   Makefile for how to do this with MS link or jwlink. The image must
   meet the following requirements:
 
    - Subsystem has to be "native"; avoids the image being loaded in Win64
-   - image must contain base relocations
+   - image must contain base relocations (they must NOT be "stripped")
    - no dll references ("imports") are possible
    - base of image must be < 4 GB
 

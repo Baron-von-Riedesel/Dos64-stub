@@ -39,14 +39,15 @@ sym db text,0
     exitm <offset sym>
 endm
 
-;--- in 16-bit code, use 32-bit variants of LGDT, LIDT
 
 @lgdt macro addr
-    db 66h
+;--- 16-bit variant ok, GDT remains in conv. memory
+;    db 66h
     lgdt addr
 endm
 @lidt macro addr
-    db 66h
+;--- 16-bit variant ok, IDT remains in 24-bit address space
+;    db 66h
     lidt addr
 endm
 
@@ -71,9 +72,9 @@ endm
 ;--- 16bit start/exit code
 
 SEL_CODE64 equ 1*8
-SEL_FLAT   equ 2*8
-SEL_CODE16 equ 3*8
-SEL_DATA16 equ 4*8
+SEL_CODE16 equ 2*8
+SEL_DATA16 equ 3*8
+SEL_FLAT   equ 4*8
 
     .code
 
@@ -81,9 +82,9 @@ SEL_DATA16 equ 4*8
 
 GDT dq 0                    ; null descriptor
     dw 0FFFFh,0,9A00h,0AFh  ; 64-bit code descriptor
-    dw 0FFFFh,0,9200h,0CFh  ; 32-bit flat data descriptor
     dw 0FFFFh,0,9A00h,0h    ; 16-bit, 64k code descriptor
     dw 0FFFFh,0,9200h,0h    ; 16-bit, 64k data descriptor
+    dw 0FFFFh,0,9200h,0CFh  ; 32-bit flat data descriptor, used for unreal mode only
 
     .data
 
@@ -338,6 +339,8 @@ start16 proc
     mov adjust, eax
     add eax, ebx
     mov PhysBase, eax
+    mov pPML4, eax      ; allocate the first page for PML4
+    add eax,1000h
     mov PhysCurr, eax	; start of free physical pages
 
 ;--- prepare EMB moves
@@ -462,7 +465,7 @@ start16 proc
     mov cr3, eax        ; load page-map level-4 base
 
     call setpic
-    @lgdt [GDTR]        ; use 32-bit version of LGDT
+    @lgdt [GDTR]
     @lidt [IDTR]
 
     mov eax,cr4
@@ -514,39 +517,37 @@ start16 endp
 MapPages proc stdcall uses es pages:dword, linaddr:qword, physaddr:dword
 
     call EnableUnreal
-    .if (pPML4 == 0)
-        mov eax,PhysCurr
-        add PhysCurr,1000h
-        mov pPML4,eax      ;set PML4
-    .endif
     .while pages
         mov eax,dword ptr linaddr+0
         mov edx,dword ptr linaddr+4
         mov cx,3
 @@:
-        shrd eax,edx,9      ;offset in PT,PD,PDPT,PML4
+        shrd eax,edx,9
         shr edx,9
         push eax
         loop @B
+;--- 3 offsets pushed:
+;--- 1. bits 0-11 offset in PT   (linaddr [12-20])
+;--- 2. bits 0-11 offset in PD   (linaddr [21-29])
+;--- 3. bits 0-11 offset in PDPT (linaddr [30-38])
         shr eax,9           
-;--- eax contains now bits 36-63 of linaddr (28 bits)
-;--- valid are the lower 12 bits (36-47)
-;--- bits 47-63 must be identical ( bits 0ffff800 )
+;--- eax bits 0-11 offset in PML4 (linaddr [39-47])
+;--- eax bits 11-27 [bitmask 0ffff800] must be identical
         and eax,0ff8h
         mov cx,3
         mov ebx,pPML4
 @@:
-        mov esi,es:[ebx+eax]
-        .if (esi == 0)             ;does PDPTE/PDE/PTE exist?
-            mov esi,PhysCurr
+        mov edx,es:[ebx+eax]
+        .if (edx == 0)             ;does PDPTE/PDE/PTE exist?
+            mov edx,PhysCurr
             add PhysCurr,1000h
-            or si,11b
-            mov es:[ebx+eax],esi
+            or dl,11b
+            mov es:[ebx+eax],edx
 ;           mov es:[ebx+eax+4],x   ;if phys ram > 4 GB is used
         .endif
         pop eax
         and eax,0ff8h
-        mov ebx,esi
+        mov ebx,edx
 ;       and bx,0FC00h
         and bx,0F000h
         loop @B
@@ -577,8 +578,8 @@ EnableUnreal proc
     mov cr0,eax
     jmp @F
 @@:
-    mov bx,SEL_FLAT
-    mov es,bx
+    push SEL_FLAT
+    pop es
     and al,0FEh
     mov cr0,eax
     jmp @F
@@ -703,31 +704,12 @@ backtoreal proc
     int 21h
 backtoreal endp
 
-;--- call real-mode thru DPMI function ax=0x300, bl=intno, edi=RMCS
-;--- ESP=linear address of wStkBot-40h, points to RMCS
+;--- call real-mode thru DPMI function ax=0x300
+;--- DS,ES,SS=DGROUP; interrupts disabled
+;--- SP->RMCS (CS:IP is not used)
+;--- variable adjust contains real-mode CS:IP
 
 call_rmode proc
-
-    cli
-    mov ax, SEL_FLAT
-    mov ss, ax
-    mov ax, SEL_DATA16
-    mov ds, ax
-    mov es, ax
-    shl bx,2
-    mov ecx,ss:[bx]
-    mov [adjust], ecx       ;use the adjust var to temporarily store CS:IP
-    mov bx, wStkBot
-    sub bx, 40h
-    sub wStkBot,(8+6+4+4)   ;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
-    cmp dword ptr [esp].RMCS.regSP,0
-    jnz @F
-    mov [esp].RMCS.regSP, bx
-    mov [esp].RMCS.rSS,DGROUP
-@@:
-    mov ax,ds
-    mov ss,ax
-    movzx esp,bx	;clear highword ESP, [ESP] is used below!
 
 ;--- disable paging & protected-mode
     mov eax,cr0
@@ -742,6 +724,7 @@ call_rmode proc
     wrmsr
 
     @lidt [nullidt]  ; IDTR=real-mode compatible values
+    sub wStkBot,(8+6+4+4)   ;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
     popad
     pop wFlags
     pop es
@@ -749,7 +732,7 @@ call_rmode proc
     pop fs
     pop gs
     lss sp,[esp+4]
-    push cs:wFlags
+    push cs:wFlags   ;make an IRET frame
     push DGROUP
     push offset backtopm
     jmp dword ptr cs:[adjust]
@@ -764,7 +747,7 @@ backtopm:
     pushad
     movzx esp,sp
     add cs:wStkBot,(8+6+4+4)
-    @lgdt cs:[GDTR]     ; use 32-bit version of LGDT
+    @lgdt cs:[GDTR]
     @lidt cs:[IDTR]
 
 ;--- (re)enable long mode
@@ -802,8 +785,8 @@ make_int_gates proc
 make_int_gates endp
 
 ;--- create IDT for long mode
-;--- DI->1 KB buffer
-;--- EBX->linear address of stub start
+;--- DI->4 KB buffer
+;--- EBX->linear address of _TEXT64 segment
 
 createIDT proc
 
@@ -1027,7 +1010,7 @@ _TEXT64 segment para use64 public 'CODE'
 
 long_start proc
 
-;--- ensure ss is valid
+;--- ensure ss is valid?!
     xor eax,eax
     mov ss,eax
 
@@ -1323,23 +1306,40 @@ int31_300:
 
 ;--- the contents of the RMCS has to be copied
 ;--- to conventional memory. We use 64 bytes of
-;--- the DGROUP stack, additionally save value or RSP
+;--- the DGROUP stack, additionally save value of RSP
 ;--- there at offset 38h.
 
-    mov eax,DGROUP
-    shl eax,4
-    movzx edi,word ptr [eax+offset wStkBot] 
-    lea edi,[edi+eax-40h]
-    mov [edi+38h],rsp
-    mov esp,edi
+    mov ecx,DGROUP
+    shl ecx,4
+    movzx ebx,bl
+    mov eax,[rbx*4]
+    mov bx,word ptr [rcx+offset wStkBot] 
+    sub bx,40h
+    lea edi,[rbx+rcx]
+    mov [rcx+offset adjust],eax
+    mov [rdi+38h],rsp
     cld
-    movsq   ;copy 32h bytes, the full RMCS struct
-    movsq
+    movsq   ;copy 2Ah bytes
     movsq
     movsq
     movsq
     movsq
     movsw
+    movsd   ;copy CS:IP (unused)
+    lodsd   ;get SS:SP
+    and eax,eax
+    jnz @F
+    mov ax,DGROUP
+    shl eax,16
+    mov ax,bx
+@@:
+    stosd
+    mov ax, SEL_DATA16
+    mov ds, eax
+    mov es, eax
+    cli
+    mov ss, eax
+    movzx esp,bx	;clear highword ESP, ESP is used inside call_rmode
     jmp [pcall_rmode]
 pcall_rmode label ptr far16
     dw offset call_rmode
@@ -1348,9 +1348,11 @@ back_to_long::
     mov edx,DGROUP
     shl edx,4
     lea esi,[esp+edx]
+
     xor eax,eax
     mov ss,eax
-    mov rsp,[esi+38h]
+    mov rsp,[rsi+38h]
+
     sti
     mov rdi,[rsp]
     cld

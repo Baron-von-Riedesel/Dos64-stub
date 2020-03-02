@@ -47,13 +47,13 @@ sym db text,0
     exitm <offset sym>
 endm
 
-;--- in 16-bit code, use 32-bit variants of LGDT, LIDT
-
 @lgdt macro addr
-    db 66h
+;--- 16-bit variant is ok, since GDT remains in conventional memory
+;    db 66h
     lgdt addr
 endm
 @lidt macro addr
+;--- IDT may be beyond 24-bit address space!
     db 66h
     lidt addr
 endm
@@ -74,9 +74,8 @@ endm
 ;--- 16bit start/exit code
 
 SEL_CODE64 equ 1*8
-SEL_FLAT   equ 2*8
-SEL_CODE16 equ 3*8
-SEL_DATA16 equ 4*8
+SEL_CODE16 equ 2*8
+SEL_DATA16 equ 3*8
 
     .code
 
@@ -84,14 +83,14 @@ SEL_DATA16 equ 4*8
 
 GDT dq 0                    ; null descriptor
     dw 0FFFFh,0,9A00h,0AFh  ; 64-bit code descriptor
-    dw 0FFFFh,0,9200h,0CFh  ; 32-bit flat data descriptor
     dw 0FFFFh,0,9A00h,0h    ; 16-bit, 64k code descriptor
     dw 0FFFFh,0,9200h,0h    ; 16-bit, 64k data descriptor
+;   dw 0FFFFh,0,9200h,0CFh  ; 32-bit flat data descriptor
 
     .data
 
 GDTR label fword        ; Global Descriptors Table Register
-    dw 5*8-1            ; limit of GDT (size minus one)
+    dw 4*8-1            ; limit of GDT (size minus one)
     dd offset GDT       ; linear address of GDT
 IDTR label fword        ; IDTR in long mode
     dw 256*16-1         ; limit of IDT (size minus one)
@@ -408,7 +407,7 @@ memsizeok:
 
     cli
     call setpic
-    @lgdt [GDTR]        ; use 32-bit version of LGDT
+    @lgdt [GDTR]
     @lidt [IDTR]
 
 ;--- long_start expects linear address of image base (PE header) in ebx
@@ -565,31 +564,12 @@ backtoreal proc
     int 21h
 backtoreal endp
 
-;--- call real-mode thru DPMI function ax=0x300, bl=intno, edi=RMCS
-;--- ESP=linear address of wStkBot-40h, points to RMCS
+;--- call real-mode thru DPMI function ax=0x300
+;--- DS,ES,SS=DGROUP; interrupts disabled
+;--- SP->RMCS (CS:IP not used)
+;--- variable adjust contains real-mode CS:IP
 
 call_rmode proc
-
-    cli
-    mov ax, SEL_FLAT
-    mov ss, ax
-    mov ax, SEL_DATA16
-    mov ds, ax
-    mov es, ax
-    shl bx,2
-    mov ecx,ss:[bx]
-    mov [adjust], ecx       ;use the adjust var to temporarily store CS:IP
-    mov bx, wStkBot
-    sub bx, 40h
-    sub wStkBot,(8+6+4+4)   ;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
-    cmp dword ptr [esp].RMCS.regSP,0
-    jnz @F
-    mov [esp].RMCS.regSP, bx
-    mov [esp].RMCS.rSS,DGROUP
-@@:
-    mov ax,ds
-    mov ss,ax
-    movzx esp,bx	;clear highword ESP, [ESP] is used below!
 
 ;--- disable paging & protected-mode
     mov eax,cr0
@@ -604,6 +584,7 @@ call_rmode proc
     wrmsr
 
     @lidt [nullidt]  ; IDTR=real-mode compatible values
+    sub wStkBot,(8+6+4+4)   ;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
     popad
     pop wFlags
     pop es
@@ -611,7 +592,7 @@ call_rmode proc
     pop fs
     pop gs
     lss sp,[esp+4]
-    push cs:wFlags
+    push cs:wFlags   ;make an IRET frame
     push DGROUP
     push offset backtopm
     jmp dword ptr cs:[adjust]
@@ -626,7 +607,7 @@ backtopm:
     pushad
     movzx esp,sp
     add cs:wStkBot,(8+6+4+4)
-    @lgdt cs:[GDTR]     ; use 32-bit version of LGDT
+    @lgdt cs:[GDTR]
     @lidt cs:[IDTR]
 
 ;--- (re)enable long mode
@@ -664,8 +645,8 @@ make_int_gates proc
 make_int_gates endp
 
 ;--- create IDT for long mode
-;--- DI->1 KB buffer
-;--- EBX->linear address of stub start
+;--- DI->4 KB buffer
+;--- EBX->linear address of _TEXT64 segment
 
 createIDT proc
 
@@ -968,7 +949,7 @@ _TEXT64 segment para use64 public 'CODE'
 
 long_start proc
 
-;--- ensure ss is valid
+;--- ensure ss is valid!?
     xor eax,eax
     mov ss,eax
 
@@ -1256,23 +1237,40 @@ int31_300:
 
 ;--- the contents of the RMCS has to be copied
 ;--- to conventional memory. We use 64 bytes of
-;--- the DGROUP stack, additionally save value or RSP
+;--- the DGROUP stack, additionally save value of RSP
 ;--- there at offset 38h.
 
-    mov eax,DGROUP
-    shl eax,4
-    movzx edi,word ptr [eax+offset wStkBot] 
-    lea edi,[edi+eax-40h]
-    mov [edi+38h],rsp
-    mov esp,edi
+    mov ecx,DGROUP
+    shl ecx,4
+    movzx ebx,bl
+    mov eax,[rbx*4]
+    mov bx,word ptr [rcx+offset wStkBot] 
+    sub bx,40h
+    lea edi,[rbx+rcx]
+    mov [rcx+offset adjust],eax
+    mov [rdi+38h],rsp
     cld
-    movsq   ;copy 32h bytes, the full RMCS struct
-    movsq
+    movsq   ;copy 2Ah bytes
     movsq
     movsq
     movsq
     movsq
     movsw
+    movsd   ;copy CS:IP (unused)
+    lodsd   ;get SS:SP
+    and eax,eax
+    jnz @F
+    mov ax,DGROUP
+    shl eax,16
+    mov ax,bx
+@@:
+    stosd
+    mov ax, SEL_DATA16
+    mov ds, eax
+    mov es, eax
+    cli
+    mov ss, eax
+    movzx esp,bx	;clear highword ESP, ESP is used inside call_rmode
     jmp [pcall_rmode]
 pcall_rmode label ptr far16
     dw offset call_rmode
@@ -1281,9 +1279,11 @@ back_to_long::
     mov edx,DGROUP
     shl edx,4
     lea esi,[esp+edx]
+
     xor eax,eax
     mov ss,eax
-    mov rsp,[esi+38h]
+    mov rsp,[rsi+38h]
+
     sti
     mov rdi,[rsp]
     cld

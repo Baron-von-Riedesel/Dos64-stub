@@ -1,15 +1,33 @@
 
   What is Dos64stb2?
 
-  Dos64stb2 is a variant of Dos64stb. In most aspects it behaves like
+  Dos64stb2 is a variant of Dos64stb. In many aspects it behaves like
   Dos64stb, with the following differences:
 
    - it doesn't require the image to contain base relocations, because
-     it is able to load the image at its prefered loading address.
-   - it does not map the full physical memory in the page tables, but
-     just the memory that the image "owns" ( + the conventional memory
-     0-fffffh ). Also, it doesn't use 2 MB pages, but just the standard
-     4 kB pages.
-   - the image base address is not restricted to be < 100000000h.
+     it should be able to load the image at its prefered loading address.
+   - it does not identity-map the first 64 GB of physical memory. Instead,
+     just the memory for the image, stack & heap, the conventional memory
+     0-fffffh and the IDT is mapped.
+   - it doesn't use 2 MB pages, but the usual 4 kB pages.
+   - there are no restrictions for the image's base address, it may be any
+     valid 64-bit address.
    - the IDT is mapped at linear address 100000h, just above conventional
-     memory.
+     memory; paging tables are not mapped at all. So the memory layout is:
+
+   address
+   ---------------------------------------------------
+                   ~                                ~
+                   +--------------------------------+
+                   | Heap (size from PE header)     |
+                   +--------------------------------+
+                   | Stack (size from PE header)    |
+                   +--------------------------------+
+                   | Image, starting with PE header |
+   image base:     +--------------------------------+
+                   ~                                ~
+   000000101000:   +--------------------------------+
+                   | IDT                            |
+   000000100000:   +--------------------------------+
+                   | conventional memory            |
+   000000000000:   +--------------------------------+  

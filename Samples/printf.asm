@@ -8,13 +8,11 @@
 
 	.code
 
-strlen proc uses rsi string:ptr
-	mov rsi,string
-@@:
-	lodsb
-	and al,al
-	jnz @B
-	lea rax,[rsi-1]
+strlen proc uses rdi string:ptr
+	mov rdi,string
+	mov al,0
+	repnz scasb
+	lea rax,[rdi-1]
 	sub rax,string
 	ret
 strlen endp

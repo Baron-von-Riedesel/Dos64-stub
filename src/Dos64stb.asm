@@ -23,8 +23,11 @@ DGROUP group _TEXT	;makes a tiny model
 ?PML4E equ ((?PDPTE-1) shr 9) + 1	;required entries in PML4
 ?MAXIMGSIZE equ 1024*1024	;max size of image+stack in kB (default 1 GB)
 ?HEAP  equ 0    ; 1=add heapsize of image to amount of memory to be allocated
-?MPIC  equ 78h	; master PIC base, remapped to 78h
-?SPIC  equ 70h	; slave PIC, isn't changed
+?MPIC  equ 78h  ; master PIC base, remapped to 78h
+?SPIC  equ 70h  ; slave PIC, isn't changed
+?RESETLME equ 0 ;1=(re)set EFER.LME for temp switch to real-mode
+?RESETPAE equ 0 ;1=(re)set CR4.PAE  for temp switch to real-mode
+?SETCR3   equ 0 ;1=set CR3 after temp switch to real-mode
 
 if ?PML4E gt 200h
     .err <256 TB is max. paging capacity>
@@ -74,8 +77,8 @@ endm
 ;--- 16bit start/exit code
 
 SEL_CODE64 equ 1*8
-SEL_CODE16 equ 2*8
-SEL_DATA16 equ 3*8
+SEL_DATA16 equ 2*8
+SEL_CODE16 equ 3*8
 
     .code
 
@@ -83,8 +86,8 @@ SEL_DATA16 equ 3*8
 
 GDT dq 0                    ; null descriptor
     dw 0FFFFh,0,9A00h,0AFh  ; 64-bit code descriptor
-    dw 0FFFFh,0,9A00h,0h    ; 16-bit, 64k code descriptor
     dw 0FFFFh,0,9200h,0h    ; 16-bit, 64k data descriptor
+    dw 0FFFFh,0,9A00h,0h    ; 16-bit, 64k code descriptor
 ;   dw 0FFFFh,0,9200h,0CFh  ; 32-bit flat data descriptor
 
     .data
@@ -100,6 +103,7 @@ nullidt label fword     ; IDTR for real-mode
     dd 0
   
 xmsaddr dd 0
+dwCSIP  label dword
 adjust  dd 0
 xmshdl  dw -1
 fhandle dw -1
@@ -118,6 +122,7 @@ nthdr   IMAGE_NT_HEADERS <>
 sechdr  IMAGE_SECTION_HEADER <>
 emm     EMM <>   ;xms block move structure
 emm2    EMM <>   ;another one for nested calls
+qwRSP    dq ?    ;saved protected-mode rsp
 PhysBase dd ?    ;linear (+physical) address start of page tables (=CR3)
 ImgBase dd ?     ;linear address image base
 fname   dd ?     ;file name of executable
@@ -340,7 +345,7 @@ memsizeok:
     call createPgTabs
 
 ;--- setup ebx/rbx with linear address of _TEXT64
-    mov ebx,_TEXT64
+    mov ebx,seg long_start
     shl ebx,4
     add [llgofs], ebx
     add [llgofs2], ebx
@@ -404,8 +409,17 @@ memsizeok:
     int 21h
 
     call setints
+if ?MPIC ne 8
+    in al,21h
+    mov bPICM,al
+endif
+if ?SPIC ne 70h
+    in al,0A1h
+    mov bPICS,al
+endif
 
     cli
+    mov dx,?SPIC shl 8 or ?MPIC
     call setpic
     @lgdt [GDTR]
     @lidt [IDTR]
@@ -510,33 +524,28 @@ readsection endp
 
 backtoreal proc
 
-    cli
-    mov ax,SEL_DATA16
-    mov ds,ax
-    mov es,ax
-    mov ss,ax
-    mov sp,wStkBot
-
     mov eax,cr0
     and eax,7ffffffeh   ; disable protected-mode & paging
     mov cr0,eax
     jmp far16 ptr @F
 @@:
-    @lidt [nullidt]     ; IDTR=real-mode compatible values
-    mov ecx,0C0000080h  ; EFER MSR
-    rdmsr
-    and ah,0feh         ; disable long mode (EFER.LME=0)
-    wrmsr
 @@exit2::
     mov ax, cs
     mov ss, ax          ; SS=DGROUP
     mov ds, ax          ; DS=DGROUP
+    @lidt [nullidt]     ; IDTR=real-mode compatible values
+
+    mov ecx,0C0000080h  ; EFER MSR
+    rdmsr
+    and ah,0feh         ; disable long mode (EFER.LME=0)
+    wrmsr
 
     mov eax,cr4
     and al,0DFh         ; reset bit 5, disable PAE paging
     mov cr4,eax
 
-    call resetpic
+    mov dx,7008h
+    call setpic
     call restoreints
 @@exit::
     sti
@@ -565,9 +574,9 @@ backtoreal proc
 backtoreal endp
 
 ;--- call real-mode thru DPMI function ax=0x300
-;--- DS,ES,SS=DGROUP; interrupts disabled
-;--- SP->RMCS (CS:IP not used)
-;--- variable adjust contains real-mode CS:IP
+;--- SS=DGROUP; interrupts disabled
+;--- SP->modified RMCS, without CS:IP;
+;--- variable dwCSIP contains real-mode CS:IP
 
 call_rmode proc
 
@@ -578,24 +587,29 @@ call_rmode proc
     jmp @F
 @@:
 ;--- disable long mode
+if ?RESETLME
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     and ah,0feh
     wrmsr
-
-    @lidt [nullidt]  ; IDTR=real-mode compatible values
-    sub wStkBot,(8+6+4+4)   ;saved RSP, 6 bytes unused, RMCS SS:SP, RMCS CS:IP
+endif
+if ?RESETPAE
+    mov eax,cr4
+    and al,0DFh         ; reset bit 5, disable PAE paging
+    mov cr4,eax
+endif
+    @lidt cs:[nullidt]  ; IDTR=real-mode compatible values
     popad
-    pop wFlags
+    pop cs:wFlags
     pop es
     pop ds
     pop fs
     pop gs
-    lss sp,[esp+4]
+    lss sp,[esp]
     push cs:wFlags   ;make an IRET frame
-    push DGROUP
-    push offset backtopm
-    jmp dword ptr cs:[adjust]
+    push DGROUP      ;CS still holds a selector!
+    push backtopm
+    jmp cs:[dwCSIP]
 backtopm:
     lss sp,dword ptr cs:wStkBot
     push gs
@@ -606,16 +620,29 @@ backtopm:
     cli
     pushad
     movzx esp,sp
-    add cs:wStkBot,(8+6+4+4)
     @lgdt cs:[GDTR]
     @lidt cs:[IDTR]
 
 ;--- (re)enable long mode
+if ?RESETLME
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     or ah,1             ; set long mode
     wrmsr
-
+endif
+if ?RESETPAE
+    mov eax,cr4
+    or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
+    mov cr4,eax
+endif
+if ?SETCR3
+    mov eax,cr3
+    mov edx,cs:PhysBase
+    cmp eax,edx
+    jz @F
+    mov cr3,edx
+@@:
+endif
 ;--- enable protected-mode + paging
     mov eax,cr0
     or eax,80000001h
@@ -688,21 +715,28 @@ make_exc_gates:
 
 ;--- setup IRQ0, Int21, Int31
 
-    lea eax, [ebx+offset clock]
-    mov [di+(?MPIC+0)*16+0],ax ; set IRQ 0 handler
+    mov si,offset tab1
+    mov cx,3
+nextitem:
+    lodsw
+    mov dx,ax
+    lodsw
+    movzx eax,ax
+    add eax, ebx
+    shl dx,4
+    push di
+    add di,dx
+    mov [di],ax
     shr eax,16
-    mov [di+(?MPIC+0)*16+6],ax
-
-    lea eax,[ebx+offset int21]
-    mov [di+21h*16+0],ax ; set int 21h handler
-    shr eax,16
-    mov [di+21h*16+6],ax
-
-    lea eax,[ebx+offset int31]
-    mov [di+31h*16+0],ax ; set int 31h handler
-    shr eax,16
-    mov [di+31h*16+6],ax
+    mov [di+6],ax
+    pop di
+    loop nextitem
     ret
+
+tab1 label word
+    dw ?MPIC, offset clock
+    dw 21h,   offset int21
+    dw 31h,   offset int31
 
 createIDT endp
 
@@ -856,92 +890,41 @@ endif
 
 setints endp
 
-;--- reprogram PIC
+;--- reprogram/restore PIC
 ;--- DS=DGROUP
 
 setpic proc
 
 ;--- change IRQ 0-7 to ?MPIC
 if ?MPIC ne 8
-    in al,21h
-    mov bPICM,al
-    mov al,10001b       ; begin PIC 1 initialization
+    mov al,10001b       ; ICW1: initialization
     out 20h,al
-    mov al,?MPIC        ; IRQ 0-7: interrupts 80h-87h
+    mov al,dl           ; ICW2: IRQ 0-7: interrupts ?MPIC-?MPIC+7
     out 21h,al
-    mov al,100b         ; slave connected to IRQ2
+    mov al,100b         ; ICW3: slave connected to IRQ2
     out 21h,al
-    mov al,1            ; Intel environment, manual EOI
+    mov al,1            ; ICW4: Intel environment, manual EOI
     out 21h,al
-    in al,21h
-endif
-;--- change IRQ 8-F to ?SPIC
-if ?SPIC ne 70h
-    in al,0A1h
-    mov bPICS,al
-    mov al,10001b       ; begin PIC 2 initialization
-    out 0A0h,al
-    mov al,?SPIC        ; IRQ 8-15: interrupts 88h-8Fh
-    out 0A1h,al
-    mov al,2
-    out 0A1h,al
-    in al,0A1h
-endif
-if ?MPIC ne 8
     mov al,bPICM
     out 21h,al
 endif
+;--- change IRQ 8-F to ?SPIC
 if ?SPIC ne 70h
+    mov al,10001b       ; ICW1: initialization
+    out 0A0h,al
+    mov al,dh           ; ICW2: IRQ 8-15: interrupts ?SPIC-?SPIC+7
+    out 0A1h,al
+    mov al,2            ; ICW3:
+    out 0A1h,al
+    mov al,1            ; ICW4: Intel environment, manual EOI
+    out 0A1h,al
     mov al,bPICS
     out 0A1h,al
 endif
     ret
 setpic endp
 
-;--- restore PIC: change IRQ 0-7 to INT 08h-0Fh
-;--- DS=DGROUP
-
-resetpic proc 
-
-if ?MPIC ne 8
-    mov al,10001b       ; begin PIC 1 initialization
-    out 20h,al
-    mov al,08h          ; IRQ 0-7: back to ints 8h-Fh
-    out 21h,al
-    mov al,100b         ; slave connected to IRQ2
-    out 21h,al
-    mov al,1            ; Intel environment, manual EOI
-    out 21h,al
-    in al,21h
-endif
-if ?SPIC ne 70h
-    mov al,10001b       ; begin PIC 2 initialization
-    out 0A0h,al
-    mov al,70h          ; IRQ 8-15: back to ints 70h-77h
-    out 0A1h,al
-    mov al,2
-    out 0A1h,al
-    in  al,0A1h
-endif
-if ?MPIC ne 8
-    mov al,bPICM
-    out 21h,al
-endif
-if ?SPIC ne 70h
-    mov al,bPICS
-    out 0A1h,al
-endif
-    ret
-resetpic endp
-
 ;--- here's the 64bit code segment.
-;--- since 64bit code is always flat but the DOS mz format is segmented,
-;--- there are restrictions - because the assembler doesn't know the
-;--- linear address where the 64bit segment will be loaded:
-;--- + direct addressing with constants isn't possible (mov [0B8000h],rax)
-;---   since the rip-relative address will be calculated wrong.
-;--- + 64bit offsets (mov rax, offset <var>) must be adjusted by the linear
-;---   address where the 64bit segment was loaded (is in rbx).
 
 _TEXT64 segment para use64 public 'CODE'
 
@@ -949,8 +932,8 @@ _TEXT64 segment para use64 public 'CODE'
 
 long_start proc
 
-;--- ensure ss is valid!?
-    xor eax,eax
+;--- ensure ss is valid.
+    mov ax,SEL_DATA16
     mov ss,eax
 
 ;--- linear address of image start (=PE header) should be in ebx
@@ -1087,9 +1070,7 @@ excno = 0
     call WriteQW
     call WriteStrX
     db " imagebase=",0
-    mov eax,DGROUP
-    shl eax,4
-    mov eax,dword ptr [eax+ImgBase]
+    mov eax,[ImgBase]
     call WriteDW
 if 0
     call WriteStrX
@@ -1130,10 +1111,7 @@ endif
 ;--- IRQs 0-7 (clock IRQ is handled)
 
 clock:
-    push rbp
-    mov ebp,400h
-    inc dword ptr [rbp+6Ch]
-    pop rbp
+    inc dword ptr flat:[46Ch]
 Irq0007:
     push rax
 if 1
@@ -1210,6 +1188,8 @@ int21_carry:
     lea rsp,[rsp+38h]
     iretq
 int21_4c:
+    cli
+    mov sp,[wStkBot]
     jmp [pback_to_real]
 pback_to_real label ptr far16
     dw offset backtoreal
@@ -1225,6 +1205,9 @@ int31 proc
 ret_with_carry:
     or byte ptr [rsp+2*8],1 ;set carry flag
     iretq
+pcall_rmode label ptr far16
+    dw offset call_rmode
+    dw SEL_CODE16
 int31_300:
     push rax
     push rcx
@@ -1236,55 +1219,43 @@ int31_300:
     mov rsi,rdi
 
 ;--- the contents of the RMCS has to be copied
-;--- to conventional memory. We use 64 bytes of
-;--- the DGROUP stack, additionally save value of RSP
-;--- there at offset 38h.
+;--- to conventional memory. We use the DGROUP stack.
 
     mov ecx,DGROUP
     shl ecx,4
     movzx ebx,bl
     mov eax,[rbx*4]
-    mov bx,word ptr [rcx+offset wStkBot] 
-    sub bx,40h
+    mov bx,[wStkBot] 
+    sub bx,30h   ;sizeof RMCS, without CS:IP 
     lea edi,[rbx+rcx]
-    mov [rcx+offset adjust],eax
-    mov [rdi+38h],rsp
+    mov [dwCSIP],eax
+    mov [qwRSP],rsp
     cld
+    cli
     movsq   ;copy 2Ah bytes
     movsq
     movsq
     movsq
     movsq
     movsw
-    movsd   ;copy CS:IP (unused)
-    lodsd   ;get SS:SP
+    lodsq   ;get CS:IP & SS:SP
+    shr rax,32  ;skip CS:IP
     and eax,eax
     jnz @F
-    mov ax,DGROUP
-    shl eax,16
-    mov ax,bx
+    mov eax,dword ptr [wStkBot]
 @@:
     stosd
-    mov ax, SEL_DATA16
-    mov ds, eax
-    mov es, eax
-    cli
-    mov ss, eax
-    movzx esp,bx	;clear highword ESP, ESP is used inside call_rmode
+    mov esp,ebx	;clear highword ESP, ESP is used inside call_rmode
     jmp [pcall_rmode]
-pcall_rmode label ptr far16
-    dw offset call_rmode
-    dw SEL_CODE16
 back_to_long::
     mov edx,DGROUP
     shl edx,4
     lea esi,[esp+edx]
 
-    xor eax,eax
-    mov ss,eax
-    mov rsp,[rsi+38h]
+    mov ax,SEL_DATA16  ;SS will be restored by IRETQ
+    mov ss,eax         ;but interrupts need a valid SS
+    mov rsp,[qwRSP]
 
-    sti
     mov rdi,[rsp]
     cld
     movsq   ;copy 2Ah bytes back, don't copy CS:IP & SS:SP fields
@@ -1293,6 +1264,7 @@ back_to_long::
     movsq
     movsq
     movsw
+    sti
     pop rdi
     pop rsi
     pop rbp
@@ -1306,10 +1278,11 @@ int31_203:
     jae ret_with_carry
     push rax
     push rdi
-    sub rsp,16
-    sidt [rsp]
-    mov rdi,[rsp+2]
-    add rsp,16
+;    sub rsp,16
+;    sidt [rsp]
+;    mov rdi,[rsp+2]
+;    add rsp,16
+    mov edi, dword ptr [IDTR+2]
     movzx eax,bl
     shl eax,4
     add rdi,rax

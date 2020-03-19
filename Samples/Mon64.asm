@@ -14,6 +14,8 @@
 
 lf  equ 10 
 
+?V_CMD equ 0	;1=enable 'v' cmd for testing
+
 ifdef ?PE
 %   include ?lnkdef		;for option -pe
 endif
@@ -52,6 +54,15 @@ main proc
     mov address,0
 nextcmd:
     invoke printf, CStr(<"(cmds: a,c,d,q,r,s or x): ">)
+ifdef ?WAITINPM ;wait in protected-mode ( to test interrupts )
+@@:
+    mov ax,flat:[41ah]
+    cmp ax,flat:[41ch]
+    jnz @F
+    hlt
+    jmp @B
+@@:
+endif
     mov ah,1        ;read a key from keyboard with echo
     int 21h
     lea rcx,[nextcmd]
@@ -72,8 +83,10 @@ nextcmd:
     jz r_cmd
     cmp al,'s'
     jz s_cmd
+if ?V_CMD
     cmp al,'v'
     jz v_cmd
+endif
     cmp al,'x'
     jz x_cmd
     cmp al,0dh      ;ENTER?
@@ -171,10 +184,12 @@ a_cmd proc
         inc edi
     .endw
     mov rax,rsi
-    shr rax,48
+    shr rax,47
     and rax, rax
     jz @F
-    invoke printf, CStr(<"hint: magnitude of address > 48 bits, exceeds paging capacity",lf>)
+    cmp eax,1ffffh
+    jz @F
+    invoke printf, CStr(<"hint: magnitude of address > 48 bits, exceeds paging capacity">)
 @@:
     mov address,rsi
 done:
@@ -243,18 +258,35 @@ r_cmd proc
     invoke printf, CStr(<"r14=%16lX  r15=%16lX",lf>), r14, r15
     pushfq
     pop rax
-    invoke printf, CStr(<"flags=%14lX",lf>), rax
+    mov ecx,ds
+    mov edx,es
+    mov ebx,fs
+    mov esi,gs
+    mov edi,cs
+    mov ebp,ss
+    invoke printf, CStr(<"flags=%lX cs=%X ss=%X ds=%X es=%X fs=%X gs=%X",lf>), rax, rdi, rbp, rcx, rdx, rbx, rsi
+    lsl rax,rdi
+    lar rcx,rdi
+    shr rcx,8
+    lsl rdx,rbp
+    lar rbx,rbp
+    shr rbx,8
+    invoke printf, CStr(<"cslim=%X csattr=%X sslim=%X ssattr=%X",lf>), rax, rcx, rdx, rbx
     ret
 r_cmd endp
 
 ;--- display system registers
+
+?STARTINT equ 0 ;start of INTs to display
 
 s_cmd proc
     sub rsp,16
     sgdt [rsp]
     mov rdi, [rsp+2]
     movzx rsi, word ptr [rsp]
-    invoke printf, CStr(<"GDTR base=%lX  limit=%X",lf>), rdi, rsi
+    sldt eax
+    str ecx
+    invoke printf, CStr(<"GDTR base=%lX,limit=%X  LDTR=%X  TR=%X",lf>), rdi, rsi, rax, rcx
     inc rsi
     xor ebx,ebx
     .while rbx < rsi
@@ -273,8 +305,7 @@ s_cmd proc
         shl rax,12
         or ax,0fffh
 @@:
-        mov r8, rax
-        invoke printf, CStr(<"%04X: base=%08lX, limit=%08lX, attr=%04X",lf>), rbx, rcx, r8, rdx
+        invoke printf, CStr(<"%04X: base=%08lX, limit=%08lX, attr=%04X",lf>), rbx, rcx, rax, rdx
         add rdi,8
         add rbx,8
     .endw
@@ -283,37 +314,41 @@ s_cmd proc
     mov rdi, [rsp+2]
     movzx rsi, word ptr [rsp]
     invoke printf, CStr(<"IDTR base=%lX  limit=%X",lf>), rdi, rsi
-    invoke printf, CStr(<" #      addr     attr      addr     attr      addr     attr      addr     attr",lf>)
-    xor ebx,ebx
-    .while ebx < 64
-        test bl,3
-        jnz @F
-        invoke printf, CStr(<"%2X ">), rbx
-@@:
-        mov si,[rdi+6]
-        shl esi,16
-        mov si,[rdi+0]
+    invoke printf, CStr(<" #    addr             attr    addr             attr    addr             attr",lf>)
+if ?STARTINT
+    add rdi,?STARTINT*16
+endif
+    lea rsi,[rdi+16*30h]
+    mov bh,?STARTINT
+    .while rdi < rsi
+        movzx eax,bh
+        invoke printf, CStr(<"%2X ">), rax
+        mov bl,3
+nextitem:
+        mov rax,[rdi+4]
+        mov ax,[rdi+0]
         movzx ecx,word ptr [rdi+2]
         movzx edx,word ptr [rdi+4]
-        invoke printf, CStr(<"%4X:%08X-%4X ">), rcx, rsi, rdx
-        inc ebx
-        test bl,3
-        jnz @F
-        invoke printf, CStr(<lf>)
-@@:
+        invoke printf, CStr(<"%2X:%016lX-%4X ">), rcx, rax, rdx
         add rdi,16
+        dec bl
+        jnz nextitem
+        invoke printf, CStr(<lf>)
+        add bh,3
     .endw
     add rsp,16
     ret
 s_cmd endp
 
 ;--- for various testings
-
+if ?V_CMD
 v_cmd proc
-    vzeroall
+    mov ax,0400h
+    int 31h
+    invoke printf, CStr(<"int 31h, ax=0400h:%X",lf>),rax
     ret
 v_cmd endp
-
+endif
 ;--- display xmm registers
 
 x_cmd proc

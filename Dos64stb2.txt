@@ -31,3 +31,15 @@
    000000100000:   +--------------------------------+
                    | conventional memory            |
    000000000000:   +--------------------------------+  
+
+
+   Note that the valid address space is split into two parts:
+
+   1. 0000000000000000-00007fffffffffff
+   2. ffff800000000000-ffffffffffffffff
+
+   or, in other words, the upper 17 bits of the address must be
+   identical. The image, including stack and heap, must fit in
+   one of those 2 parts. So, for example, an image with base 
+   address 7fffffff0000 and size of image+stack+heap > 64 kB cannot
+   be loaded.

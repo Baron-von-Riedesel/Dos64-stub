@@ -424,8 +424,9 @@ endif
     @lgdt [GDTR]
     @lidt [IDTR]
 
-;--- long_start expects linear address of image base (PE header) in ebx
-    mov ebx,ImgBase
+;--- long_start expects linear address of image base (PE header) in ebx.
+;--- obsolete, since the variables may be accessed from 64-bit directly.
+;    mov ebx,ImgBase
 
     mov eax,cr4
     or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
@@ -936,9 +937,12 @@ long_start proc
     mov ax,SEL_DATA16
     mov ss,eax
 
-;--- linear address of image start (=PE header) should be in ebx
+;--- linear address of image start (=PE header) should be in ebx.
+;--- obsolete, since variables in DGROUP may be accessed directly.
 
-    mov ebx,ebx     ; clear high32 of rbx
+;    mov ebx,ebx     ; clear high32 of rbx
+    mov ebx, ImgBase
+
     mov ecx,[rbx].IMAGE_NT_HEADERS.OptionalHeader.SizeOfImage
     add rcx,[rbx].IMAGE_NT_HEADERS.OptionalHeader.SizeOfStackReserve
     add rcx,rbx

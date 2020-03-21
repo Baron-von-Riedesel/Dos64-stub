@@ -19,8 +19,8 @@ DGROUP group _TEXT	;makes a tiny model
 
     option MZ:sizeof IMAGE_DOS_HEADER   ;set min size of MZ header if jwasm's -mz option is used
 
-?MPIC  equ 80h	; master PIC base, remapped to 78h
-?SPIC  equ 88h	; slave PIC, isn't changed
+?MPIC  equ 78h	; master PIC base, remapped to 78h
+?SPIC  equ 70h	; slave PIC, isn't changed
 ?RESETLME equ 0;1=(re)set EFER.LME for temp switch to real-mode
 ?RESETPAE equ 0;1=(re)set CR4.PAE  for temp switch to real-mode
 ?SETCR3   equ 0;1=set CR3 after temp switch to real-mode
@@ -494,9 +494,10 @@ endif
     or ah,1             ; enable long mode
     wrmsr
 
-;--- long_start expects linear address of image base (PE header) in edx:ebx
-    mov ebx,dword ptr nthdr.OptionalHeader.ImageBase+0
-    mov edx,dword ptr nthdr.OptionalHeader.ImageBase+4
+;--- long_start expects linear address of image base (PE header) in edx:ebx.
+;--- obsolete, since variables in DGROUP can be accessed directly
+;    mov ebx,dword ptr nthdr.OptionalHeader.ImageBase+0
+;    mov edx,dword ptr nthdr.OptionalHeader.ImageBase+4
 
 ;--- enable protected-mode + paging
     mov eax,cr0
@@ -1029,9 +1030,11 @@ long_start proc
 
 ;--- linear address of image start (=PE header) should be in edx::ebx
 ;--- move it to rbx using registers only.
+;--- obsolete, since variables in DGROUP may be accessed directly.
 
-    shl rbx,32
-    shrd rbx,rdx,32
+;    shl rbx,32
+;    shrd rbx,rdx,32
+    mov rbx,nthdr.OptionalHeader.ImageBase
 
 ;--- now rsp can be set
 

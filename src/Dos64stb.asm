@@ -10,6 +10,10 @@
     option casemap:none
     .stack 5120
 
+ifndef ?IRQ0TORM
+?IRQ0TORM equ 1;1=route IRQ0 (timer) to real-mode
+endif
+
 DGROUP group _TEXT	;makes a tiny model
 
     .x64p
@@ -326,7 +330,6 @@ memsizeok:
 ;--- prepare EMB moves
     mov emm.srchdl, 0
     mov emm2.srchdl, 0
-    mov word ptr emm.srcofs+0, offset nthdr
     mov word ptr emm.srcofs+2, ds
     mov word ptr emm2.srcofs+0, sp
     mov word ptr emm2.srcofs+2, ss
@@ -360,14 +363,26 @@ memsizeok:
 
     mov ecx, sizeof IMAGE_NT_HEADERS
     mov si, offset emm
+    mov word ptr [si].EMM.srcofs+0, offset nthdr
     call copy2ext ;copy PE header (ecx bytes) to extended memory
+    mov word ptr [si].EMM.srcofs+0, offset sechdr
 
 ;--- now read & copy section headers ony by one;
 ;--- for each header read & copy section data.
     mov bx,fhandle
+    xor cx,cx
+    xor dx,dx
+    mov ax,4201h	;get current file pos in DX:AX
+    int 21h
     mov cx,nthdr.FileHeader.NumberOfSections
     .while cx
         push cx
+        push dx
+        push ax
+        mov cx,dx
+        mov dx,ax
+        mov ax,4200h	;set file pos
+        int 21h
         mov dx,offset sechdr
         mov cx,sizeof IMAGE_SECTION_HEADER
         mov ah,3Fh
@@ -377,17 +392,11 @@ memsizeok:
         jnz @@error
         mov si,offset emm
         call copy2ext	;copy section header to PE header in image
-        xor cx,cx
-        xor dx,dx
-        mov ax,4201h	;get current file pos in DX:AX
-        int 21h
-        push dx
-        push ax
         call readsection
+        pop ax
         pop dx
-        pop cx
-        mov ax,4200h	;restore file pos
-        int 21h
+        add ax,sizeof IMAGE_SECTION_HEADER
+        adc dx,0
         pop cx
         dec cx
     .endw
@@ -574,18 +583,14 @@ backtoreal proc
     int 21h
 backtoreal endp
 
-;--- call real-mode thru DPMI function ax=0x300
-;--- SS=DGROUP; interrupts disabled
-;--- SP->modified RMCS, without CS:IP;
-;--- variable dwCSIP contains real-mode CS:IP
+;--- switch to real-mode
 
-call_rmode proc
-
+switch2rm proc
 ;--- disable paging & protected-mode
     mov eax,cr0
     and eax,7ffffffeh
     mov cr0, eax
-    jmp @F
+    jmp far16 ptr @F
 @@:
 ;--- disable long mode
 if ?RESETLME
@@ -600,6 +605,49 @@ if ?RESETPAE
     mov cr4,eax
 endif
     @lidt cs:[nullidt]  ; IDTR=real-mode compatible values
+    ret
+switch2rm endp
+
+;--- switch to protected-mode
+
+switch2pm proc
+    @lgdt cs:[GDTR]
+    @lidt cs:[IDTR]
+;--- (re)enable long mode
+if ?RESETLME
+    mov ecx,0C0000080h  ; EFER MSR
+    rdmsr
+    or ah,1
+    wrmsr
+endif
+if ?RESETPAE
+    mov eax,cr4
+    or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
+    mov cr4,eax
+endif
+if ?SETCR3
+    mov eax,cr3
+    cmp eax,cs:pPML4
+    jz @F
+    mov eax,cs:pPML4
+    mov cr3,eax
+@@:
+endif
+;--- enable protected-mode + paging
+    mov eax,cr0
+    or eax,80000001h
+    mov cr0,eax
+    ret
+switch2pm endp
+
+;--- call real-mode thru DPMI function ax=0x300
+;--- SS=DGROUP; interrupts disabled
+;--- SP->modified RMCS, without CS:IP;
+;--- variable dwCSIP contains real-mode CS:IP
+
+call_rmode proc
+
+    call switch2rm
     popad
     pop cs:wFlags
     pop es
@@ -621,34 +669,7 @@ backtopm:
     cli
     pushad
     movzx esp,sp
-    @lgdt cs:[GDTR]
-    @lidt cs:[IDTR]
-
-;--- (re)enable long mode
-if ?RESETLME
-    mov ecx,0C0000080h  ; EFER MSR
-    rdmsr
-    or ah,1             ; set long mode
-    wrmsr
-endif
-if ?RESETPAE
-    mov eax,cr4
-    or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
-    mov cr4,eax
-endif
-if ?SETCR3
-    mov eax,cr3
-    mov edx,cs:PhysBase
-    cmp eax,edx
-    jz @F
-    mov cr3,edx
-@@:
-endif
-;--- enable protected-mode + paging
-    mov eax,cr0
-    or eax,80000001h
-    mov cr0,eax
-
+    call switch2pm
     db 66h,0eah         ; jmp far32
 llgofs2 dd offset back_to_long
     dw SEL_CODE64
@@ -717,7 +738,7 @@ make_exc_gates:
 ;--- setup IRQ0, Int21, Int31
 
     mov si,offset tab1
-    mov cx,3
+    mov cx,sizetab1
 nextitem:
     lodsw
     mov dx,ax
@@ -735,9 +756,11 @@ nextitem:
     ret
 
 tab1 label word
-    dw ?MPIC, offset clock
-    dw 21h,   offset int21
-    dw 31h,   offset int31
+    dw ?MPIC+0, offset clock
+    dw ?MPIC+1, offset kbd
+    dw 21h,     offset int21
+    dw 31h,     offset int31
+sizetab1 equ ($-tab1) shr 2
 
 createIDT endp
 
@@ -929,7 +952,7 @@ setpic endp
 
 _TEXT64 segment para use64 public 'CODE'
 
-    assume ds:FLAT, es:FLAT, ss:FLAT
+;    assume ds:FLAT, es:FLAT, ss:FLAT
 
 long_start proc
 
@@ -1112,20 +1135,63 @@ endif
     mov ax,4cffh
     int 21h
 
-;--- IRQs 0-7 (clock IRQ is handled)
+;--- IRQs 0-7
 
+;--- macro @call_rm_irq, defines 16-bit part of interrupt routing
+
+@call_rm_irq macro procname, interrupt
+procname proc
+    push eax
+if ?RESETLME
+    push ecx
+    push edx
+endif
+    call switch2rm  ;modifies eax [, ecx, edx]
+    mov ss,cs:[wStkBot+2]	; load ss with a real-mode segment
+    int interrupt
+    cli
+    call switch2pm  ;modifies eax [, ecx, edx]
+if ?RESETLME
+    pop edx
+    pop ecx
+endif
+    pop eax
+    retd
+procname endp
+endm
+
+;--- macro @route_irq, defines 64-bit part of interrupt routing
+
+@route_irq macro interrupt, prefix
+    .code
+    @call_rm_irq prefix&_rm,interrupt
+    .data
+p&prefix&_rm label fword
+    dd offset prefix&_rm
+    dw SEL_CODE16
+    .code _TEXT64
+prefix:
+    mov [qwRSP],rsp
+    mov sp,[wStkBot]
+    call p&prefix&_rm
+    mov rsp,[qwRSP]
+    iretq
+endm
+
+;--- route irq 1 (kbd) to real-mode
+    @route_irq 09h, kbd
+
+;--- pit clock IRQ
+
+if ?IRQ0TORM
+;--- route irq 0 (pit clock) to real-mode
+    @route_irq 08h, clock
+else
 clock:
     inc dword ptr flat:[46Ch]
+endif
 Irq0007:
     push rax
-if 1
-    mov al,0Bh	;check if keyboard data is to be read
-    out 20h,al
-    in al,20h
-    test al,2
-    jz Irq0007_1
-    in al,60h
-endif
 Irq0007_1:
     mov al,20h
     out 20h,al
@@ -1165,8 +1231,12 @@ int21 proc
     mov [rsp].RMCS.rECX, ecx
     mov [rsp].RMCS.rEAX, eax
     mov [rsp].RMCS.rFlags, 0202h
-    mov [rsp].RMCS.rDS, STACK
-    mov [rsp].RMCS.rES, STACK
+;    mov [rsp].RMCS.rES, STACK
+;    mov [rsp].RMCS.rDS, STACK
+    mov [rsp].RMCS.rES, es
+    mov [rsp].RMCS.rDS, ds
+    mov [rsp].RMCS.rFS, fs
+    mov [rsp].RMCS.rGS, gs
     mov dword ptr [rsp].RMCS.regSP, 0
     push rdi
     lea rdi,[rsp+8]
@@ -1191,13 +1261,15 @@ int21_carry:
     @loadreg AX
     lea rsp,[rsp+38h]
     iretq
+    .data
+pback_to_real label ptr far16
+    dw offset backtoreal
+    dw SEL_CODE16
+    .code _TEXT64
 int21_4c:
     cli
     mov sp,[wStkBot]
     jmp [pback_to_real]
-pback_to_real label ptr far16
-    dw offset backtoreal
-    dw SEL_CODE16
 int21 endp
 
 int31 proc
@@ -1209,9 +1281,11 @@ int31 proc
 ret_with_carry:
     or byte ptr [rsp+2*8],1 ;set carry flag
     iretq
+    .data
 pcall_rmode label ptr far16
     dw offset call_rmode
     dw SEL_CODE16
+    .code _TEXT64
 int31_300:
     push rax
     push rcx
@@ -1256,8 +1330,8 @@ back_to_long::
     shl edx,4
     lea esi,[esp+edx]
 
-    mov ax,SEL_DATA16  ;SS will be restored by IRETQ
-    mov ss,eax         ;but interrupts need a valid SS
+;    mov ax,SEL_DATA16  ;SS will be restored by IRETQ
+;    mov ss,eax         ;but interrupts need a valid SS
     mov rsp,[qwRSP]
 
     mov rdi,[rsp]
@@ -1268,7 +1342,7 @@ back_to_long::
     movsq
     movsq
     movsw
-    sti
+;    sti
     pop rdi
     pop rsi
     pop rbp

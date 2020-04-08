@@ -1,4 +1,8 @@
 
+   28.3.2020:
+   - IRQ 0+1 (timer+keyboard) now routed to real-mode, in both Dos64stb
+     and Dos64stb2.
+
    12.3.2020:
    - Dos64stb2: IRQ 1 (keyboard) now routed to real-mode.
    - bugfix in JWasm, fixups in 64-bit code will be relative if the target

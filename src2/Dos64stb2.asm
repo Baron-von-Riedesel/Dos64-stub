@@ -10,6 +10,10 @@
     option casemap:none
     .stack 5120
 
+ifndef ?IRQ0TORM
+?IRQ0TORM equ 1;1=route IRQ0 (timer) to real-mode
+endif
+
 DGROUP group _TEXT	;makes a tiny model
 
     .x64p
@@ -355,7 +359,6 @@ start16 proc
 ;--- prepare EMB moves
     mov emm.srchdl, 0
     mov emm2.srchdl, 0
-    mov word ptr emm.srcofs+0, offset nthdr
     mov word ptr emm.srcofs+2, ds
     mov word ptr emm2.srcofs+0, sp
     mov word ptr emm2.srcofs+2, ss
@@ -402,14 +405,26 @@ start16 proc
 
     mov ecx, sizeof IMAGE_NT_HEADERS
     mov si, offset emm
+    mov word ptr [si].EMM.srcofs+0, offset nthdr
     call copy2ext ;copy PE header (ecx bytes) to extended memory
+    mov word ptr [si].EMM.srcofs+0, offset sechdr
 
 ;--- now read & copy section headers ony by one;
 ;--- for each header read & copy section data.
     mov bx,fhandle
+    xor cx,cx
+    xor dx,dx
+    mov ax,4201h	;get current file pos in DX:AX
+    int 21h
     mov cx,nthdr.FileHeader.NumberOfSections
     .while cx
         push cx
+        push dx
+        push ax
+        mov cx,dx
+        mov dx,ax
+        mov ax,4200h	;set file pos to CX:DX
+        int 21h
         mov dx,offset sechdr
         mov cx,sizeof IMAGE_SECTION_HEADER
         mov ah,3Fh
@@ -419,17 +434,11 @@ start16 proc
         jnz @@error
         mov si,offset emm
         call copy2ext	;copy section header to PE header in image
-        xor cx,cx
-        xor dx,dx
-        mov ax,4201h	;get current file pos in DX:AX
-        int 21h
-        push dx
-        push ax
         call readsection
+        pop ax
         pop dx
-        pop cx
-        mov ax,4200h	;restore file pos
-        int 21h
+        add ax,sizeof IMAGE_SECTION_HEADER
+        adc dx,0
         pop cx
         dec cx
     .endw
@@ -609,6 +618,7 @@ EnableUnreal proc
 EnableUnreal endp
 
 ;--- copy cx bytes to extended memory
+;--- ds:si -> emm struct
 
 copy2ext proc
     mov [si].EMM._size,ecx
@@ -761,10 +771,10 @@ if ?RESETPAE
 endif
 if ?SETCR3
     mov eax,cr3
-    mov edx,cs:pPML4
-    cmp eax,edx
+    cmp eax,cs:pPML4
     jz @F
-    mov cr3,edx
+    mov eax,cs:pPML4
+    mov cr3,eax
 @@:
 endif
 ;--- enable protected-mode + paging
@@ -806,19 +816,6 @@ call_rmode proc
     jmp cs:[retad]
 
 call_rmode endp
-
-;--- call real-mode kbd IRQ
-
-kbd_rm proc
-    call switch2rm  ;modifies eax, ecx, edx
-;--- SS still holds a selector - hence a possible temporary 
-;--- stack switch inside INT 09h would cause a crash.
-    mov ss,cs:[wStkBot+2]
-    int 09h
-    cli
-    call switch2pm  ;modifies eax, ecx, edx
-    retd
-kbd_rm endp
 
 ;--- initialize interrupt gates in IDT 64-bit
 
@@ -1019,8 +1016,10 @@ setpic endp
 ;--- in non-64-bit segments.
 
 _TEXT64 segment para use64 public 'CODE'
+_TEXT64 ends
 
-    assume ds:FLAT, es:FLAT, ss:FLAT
+	.code _TEXT64
+;    assume ds:FLAT, es:FLAT, ss:FLAT
 
 long_start proc
 
@@ -1212,33 +1211,59 @@ endif
 
 ;--- IRQs 0-7
 
-pkbd_rm label ptr far32
-    dd offset kbd_rm
-    dw SEL_CODE16
+;--- macro @call_rm_irq, defines 16-bit part of interrupt routing
 
-;--- kbd IRQ; this irq is routed to real-mode
-;--- save/restore rax,rdx,rcx since these may be modified
-;--- by the mode-switching routines.
-kbd:
-    push rax
-    push rdx
-    push rcx
+@call_rm_irq macro procname, interrupt
+procname proc
+    push eax
+if ?RESETLME
+    push ecx
+    push edx
+endif
+    call switch2rm  ;modifies eax [, ecx, edx]
+;--- SS still holds a selector - hence a possible temporary 
+;--- stack switch inside irq handler would cause a crash.
+    mov ss,cs:[wStkBot+2]
+    int interrupt
+    cli
+    call switch2pm  ;modifies eax [, ecx, edx]
+if ?RESETLME
+    pop edx
+    pop ecx
+endif
+    pop eax
+    retd
+procname endp
+endm
+
+;--- macro @route_irq, defines 64-bit part of interrupt routing
+
+@route_irq macro interrupt, prefix
+    .code
+    @call_rm_irq prefix&_rm,interrupt
+    .data
+p&prefix&_rm label fword
+    dd offset prefix&_rm
+    dw SEL_CODE16
+    .code _TEXT64
+prefix:
     mov [qwRSP],rsp
     mov sp,[wStkBot]
-;--- SP holds now the top of the "real-mode" stack
-;--- the following FAR32 call will put the return address
-;--- onto this stack; for this to work SS must have been 
-;--- loaded with SEL_DATA16.
-    call pkbd_rm
+    call p&prefix&_rm
     mov rsp,[qwRSP]
-    pop rcx
-    pop rdx
-    pop rax
     iretq
+endm
 
-;--- PIT clock IRQ; this irq is handled 
+;--- route irq 1 (kbd) to real-mode
+    @route_irq 09h, kbd
+
+if ?IRQ0TORM
+;--- route irq 0 (pit clock) to real-mode
+    @route_irq 08h, clock
+else
 clock:
     inc dword ptr flat:[46Ch]
+endif
 Irq0007:
     push rax
 Irq0007_1:
@@ -1280,8 +1305,12 @@ int21 proc
     mov [rsp].RMCS.rECX, ecx
     mov [rsp].RMCS.rEAX, eax
     mov [rsp].RMCS.rFlags, 0202h
-    mov [rsp].RMCS.rDS, STACK
-    mov [rsp].RMCS.rES, STACK
+;    mov [rsp].RMCS.rES, STACK
+;    mov [rsp].RMCS.rDS, STACK
+    mov [rsp].RMCS.rES, es
+    mov [rsp].RMCS.rDS, ds
+    mov [rsp].RMCS.rFS, fs
+    mov [rsp].RMCS.rGS, gs
     mov dword ptr [rsp].RMCS.regSP, 0
     push rdi
     lea rdi,[rsp+8]
@@ -1306,13 +1335,15 @@ int21_carry:
     @loadreg AX
     lea rsp,[rsp+38h]
     iretq
+    .data
+pback_to_real label ptr far16
+    dw offset backtoreal
+    dw SEL_CODE16
+    .code _TEXT64
 int21_4c:
     cli
     mov sp,[wStkBot]
     jmp [pback_to_real]
-pback_to_real label ptr far16
-    dw offset backtoreal
-    dw SEL_CODE16
 int21 endp
 
 int31 proc
@@ -1324,6 +1355,11 @@ int31 proc
 ret_with_carry:
     or byte ptr [rsp+2*8],1 ;set carry flag
     iretq
+    .data
+pcall_rmode label ptr far32
+    dd offset call_rmode
+    dw SEL_CODE16
+    .code _TEXT64
 int31_300:
     push rax
     push rcx
@@ -1366,8 +1402,8 @@ int31_300:
     movzx esi,[wStkBot+2]
     shl esi,4
     add esi,esp
-    mov ax,SEL_DATA16;SS will be restored by IRETQ,
-    mov ss,eax       ;but interrupts need a valid SS
+;    mov ax,SEL_DATA16;SS will be restored by IRETQ,
+;    mov ss,eax       ;but interrupts need a valid SS
     mov rsp,[qwRSP]
 
     mov rdi,[rsp]
@@ -1378,7 +1414,7 @@ int31_300:
     movsq
     movsq
     movsw
-    sti
+;    sti
     pop rdi
     pop rsi
     pop rbp
@@ -1387,9 +1423,6 @@ int31_300:
     pop rcx
     pop rax
     iretq
-pcall_rmode label ptr far32
-    dd offset call_rmode
-    dw SEL_CODE16
 
 int31_203:
     cmp bl,20h
@@ -1414,6 +1447,6 @@ int31_203:
     iretq
 int31 endp
 
-_TEXT64 ends
+;_TEXT64 ends
 
     end start16

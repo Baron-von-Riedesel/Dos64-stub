@@ -26,8 +26,8 @@ DGROUP group _TEXT	;makes a tiny model
 ?MPIC  equ 78h	; master PIC base, remapped to 78h
 ?SPIC  equ 70h	; slave PIC, isn't changed
 ?RESETLME equ 0;1=(re)set EFER.LME for temp switch to real-mode
-?RESETPAE equ 0;1=(re)set CR4.PAE  for temp switch to real-mode
-?SETCR3   equ 0;1=set CR3 after temp switch to real-mode
+?RESETPAE equ 1;1=(re)set CR4.PAE  for temp switch to real-mode
+?SETCR3   equ 1;1=set CR3 after temp switch to real-mode
 ?IDTADR   equ 100000h	;address of IDT
 
 EMM struct  ;XMS block move help struct

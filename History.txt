@@ -1,5 +1,10 @@
 
-   28.3.2020:
+   24.10.2020:
+   - dos64stb.asm: CR3 was set rather early and assumed that it won't
+     be changed in DOS/XMS - which isn't always true (problem: HimemSX is
+     loaded and the disk cache program uses extended memory beyond 4 GB).
+
+   20.3.2020:
    - IRQ 0+1 (timer+keyboard) now routed to real-mode, in both Dos64stb
      and Dos64stb2.
 

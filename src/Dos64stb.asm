@@ -30,8 +30,8 @@ DGROUP group _TEXT	;makes a tiny model
 ?MPIC  equ 78h  ; master PIC base, remapped to 78h
 ?SPIC  equ 70h  ; slave PIC, isn't changed
 ?RESETLME equ 0 ;1=(re)set EFER.LME for temp switch to real-mode
-?RESETPAE equ 0 ;1=(re)set CR4.PAE  for temp switch to real-mode
-?SETCR3   equ 0 ;1=set CR3 after temp switch to real-mode
+?RESETPAE equ 1 ;1=(re)set CR4.PAE  for temp switch to real-mode
+?SETCR3   equ 1 ;1=set CR3 after temp switch to real-mode
 
 if ?PML4E gt 200h
     .err <256 TB is max. paging capacity>
@@ -433,6 +433,9 @@ endif
     @lgdt [GDTR]
     @lidt [IDTR]
 
+    mov edx,PhysBase    ; 24.10.2020: set CR3 here, after all DOS/XMS stuff is done
+    mov cr3,edx         ; load page-map level-4 base
+
 ;--- long_start expects linear address of image base (PE header) in ebx.
 ;--- obsolete, since the variables may be accessed from 64-bit directly.
 ;    mov ebx,ImgBase
@@ -627,9 +630,9 @@ if ?RESETPAE
 endif
 if ?SETCR3
     mov eax,cr3
-    cmp eax,cs:pPML4
+    cmp eax,cs:PhysBase
     jz @F
-    mov eax,cs:pPML4
+    mov eax,cs:PhysBase
     mov cr3,eax
 @@:
 endif
@@ -783,7 +786,7 @@ createIDT endp
 createPgTabs proc
 
     mov edx,PhysBase
-    mov cr3, edx    ; load page-map level-4 base
+;    mov cr3,edx            ; 24.10.2020: loading CR3 here was too early
     mov esi,1000h
     xor ebx,ebx
     add edx,esi

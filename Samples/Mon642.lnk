@@ -15,7 +15,7 @@
 ;	dw IMAGE_FILE_EXECUTABLE_IMAGE or IMAGE_FILE_32BIT_MACHINE	;link option /fixed:no
 
 	org IMAGE_NT_HEADERS.OptionalHeader.ImageBase
-	dq 100000000000h
+	dq 0ffff800000000000h
 
 	org IMAGE_NT_HEADERS.OptionalHeader.Subsystem
 	dw IMAGE_SUBSYSTEM_NATIVE	;link option /subsystem:native

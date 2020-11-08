@@ -587,6 +587,7 @@ backtoreal proc
 backtoreal endp
 
 ;--- switch to real-mode
+;--- may modify eax and, if ?RESETLME, ecx & edx
 
 switch2rm proc
 ;--- disable paging & protected-mode
@@ -612,6 +613,7 @@ endif
 switch2rm endp
 
 ;--- switch to protected-mode
+;--- may modify eax and, if ?RESETLME, ecx & edx
 
 switch2pm proc
     @lgdt cs:[GDTR]
@@ -629,12 +631,12 @@ if ?RESETPAE
     mov cr4,eax
 endif
 if ?SETCR3
-    mov eax,cr3
-    cmp eax,cs:PhysBase
-    jz @F
+;    mov eax,cr3        ; checking if CR3 will change won't increase speed
+;    cmp eax,cs:PhysBase; since TLB is always reset if paging is turned off
+;    jz @F
     mov eax,cs:PhysBase
     mov cr3,eax
-@@:
+;@@:
 endif
 ;--- enable protected-mode + paging
     mov eax,cr0

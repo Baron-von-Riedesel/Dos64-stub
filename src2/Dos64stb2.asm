@@ -770,12 +770,12 @@ if ?RESETPAE
     mov cr4,eax
 endif
 if ?SETCR3
-    mov eax,cr3
-    cmp eax,cs:pPML4
-    jz @F
+;    mov eax,cr3        ; useless to check if CR will change because
+;    cmp eax,cs:pPML4   ; turning paging off has reset the TLB
+;    jz @F
     mov eax,cs:pPML4
     mov cr3,eax
-@@:
+;@@:
 endif
 ;--- enable protected-mode + paging
     mov eax,cr0

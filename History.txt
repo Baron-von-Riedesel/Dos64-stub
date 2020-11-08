@@ -1,7 +1,7 @@
 
    24.10.2020:
    - dos64stb.asm: CR3 was set rather early and assumed that it won't
-     be changed in DOS/XMS - which isn't always true (problem: HimemSX is
+     be changed in DOS/XMS - which isn't always true (i.e.: HimemSX is
      loaded and the disk cache program uses extended memory beyond 4 GB).
 
    20.3.2020:

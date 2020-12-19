@@ -1,39 +1,50 @@
 
-strlen proc c uses rdi string:ptr
-	mov rdi,string
-	mov al,0
-	repnz scasb
-	lea rax,[rdi-1]
-	sub rax,string
-	ret
-strlen endp
+;--- printf implementation.
+;--- knows:
+;---  %x,  %X,  %u,  %d: dword
+;--- %lx, %lX, %lu, %ld: qword
+;--- %c: char
+;--- %s: string
 
-;--- convert long to string - always base 16
-;--- stdcall ltoa(long n, char * s);
+;--- convert qword to string
+;--- stdcall ltoa(long long number, char * tbuffer, int base );
 
-ltoa PROC c number:qword, tbuffer:ptr
+ltoa PROC c uses rdi number:qword, tbuffer:ptr, base:dword
 
 	mov ch,0
 	mov rax, number
 	mov rbx,tbuffer
+	mov edi, base
 	add rbx,20
 	mov BYTE PTR [rbx],0
 	dec rbx
+	mov ch,0
+	cmp edi,-10
+	jne @F
+	mov edi,10
+	and rax,rax
+	jns @F
+	neg rax
+	mov ch,'-'
+@@:
 
 @@nextdigit:
-	push rax
-	and al,0Fh
-	add al,'0'
-	cmp al,'9'
+	xor rdx,rdx
+	div rdi
+	add dl,'0'
+	cmp dl,'9'
 	jbe @F
-	add al,7+20h
+	add dl,7+20h
 @@:
-	mov [rbx],al
+	mov [rbx],dl
 	dec rbx
-	pop rax
-	shr rax,4
-	and rax,rax
+	and rax, rax
 	jne @@nextdigit
+	cmp ch,0
+	je @F
+	mov [rbx],ch
+	dec rbx
+@@:
 	inc rbx
 	mov rax,rbx
 	ret
@@ -86,6 +97,12 @@ done:
 	ret 
 
 formatitem:
+if 0
+	push @@L335
+else
+	lea rax,@@L335
+	push rax
+endif
 	xor edx,edx
 	mov [longarg],dl
 	mov bl,1
@@ -102,7 +119,6 @@ formatitem:
 	inc rsi
 @@:
 	mov [fillchr],rcx
-	mov [size_],edx
 	mov ebx,edx
 
 	.while ( byte ptr [rsi] >= '0' && byte ptr [rsi] <= '9' )
@@ -122,73 +138,88 @@ formatitem:
 @@:
 	lodsb
 	mov [fmt],rsi
-	or al,al
-	je done
 	cmp al,'x'
 	je handle_x
 	cmp al,'X'
 	je handle_x
 	cmp al,'s'
 	je handle_s
+	cmp al,'u'
+	je handle_u
+	cmp al,'d'
+	je handle_d
+	cmp al,'c'
+	je handle_c
+	cmp al,0
+	jnz @F
+	pop rax
+	jmp done
 handle_c:
-	push qword ptr [rdi]
+	mov al,[rdi]
 	add rdi,8
+@@:
+	push rax
 	call handle_char
-	jmp @@L335
+	retn
 
 handle_s:
 	mov rsi,[rdi]
 	add rdi,8
 	jmp print_string
 
+handle_d:
+	mov ebx,-10
+	jmp @F
+handle_u:
+	mov ebx,10
+	jmp @F
 handle_x:
+	mov ebx,16
+@@:
 	cmp [longarg],0
 	je @F
 	mov rax,[rdi]
-	add rdi,8
 	jmp @@L341
 @@:
 	mov eax,[rdi]
-	add rdi,8
+	cmp ebx,-10
+	jnz @@L341
+	movsxd rax,eax
 @@L341:
+	add rdi,8
 	lea rcx,[szTmp]
-	invoke ltoa, rax, rcx
+	invoke ltoa, rax, rcx, ebx
 	mov rsi,rax
-print_string:		;print string SI
-	push rsi
-	call strlen
-	pop rbx
-	sub [size_],eax
-	cmp [flag],1
-	jne print_string_chars
 
-	mov ebx,[size_]
-	jmp @@L363
-@@F270:
-	push [fillchr]
-	call handle_char	;print leading filler chars
-	dec ebx
-@@L363:
-	or ebx,ebx
-	jg @@F270
-	mov [size_],ebx
+print_string:		;print string RSI
+	mov rax,rsi
+	mov ebx,size_
+	.while byte ptr [rsi]
+		inc rsi
+	.endw
+	sub rsi,rax
+	xchg rax,rsi
+	sub ebx,eax
+	.if flag == 1
+		.while sdword ptr ebx > 0
+			push [fillchr]
+			call handle_char	;print leading filler chars
+			dec ebx
+		.endw
+	.endif
 
-print_string_chars:
-
-	.while (byte ptr [rsi])
+	.while byte ptr [rsi]
 		lodsb
 		push rax
 		call handle_char	;print char of string
 	.endw
 
-	mov ebx,[size_]
-@@:
-	or ebx,ebx
-	jle @@L335
-	push [fillchr]
-	call handle_char	;print trailing spaces
-	dec ebx
-	jmp @B
+	.while sdword ptr ebx > 0
+		push [fillchr]
+		call handle_char	;print trailing spaces
+		dec ebx
+	.endw
+	retn
 
 printf ENDP
 

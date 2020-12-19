@@ -1,21 +1,12 @@
 
 ;--- simple printf() implementation
-;--- understands formats %u,%d,%x,%c,%s
+;--- understands formats %u,%d,%x,%c,%s,%p
 
 	option proc:private
 	option frame:auto
 	option win64:1
 
 	.code
-
-strlen proc uses rdi string:ptr
-	mov rdi,string
-	mov al,0
-	repnz scasb
-	lea rax,[rdi-1]
-	sub rax,string
-	ret
-strlen endp
 
 ;--- ltob(long n, char * s, int base);
 ;--- convert long to string
@@ -82,7 +73,6 @@ printf PROC public frame uses rbx rsi rdi fmt:ptr byte, args:VARARG
 local flag:byte
 local longarg:byte
 local size_:dword
-local base:dword
 local fillchr:dword
 local szTmp[24]:byte
 
@@ -102,12 +92,8 @@ done:
 	ret 
 
 formatitem:
-	cmp byte ptr [rsi],'%'	;%%?
-	jnz @F
-	lodsb
-	invoke handle_char, eax
-	jmp nextchar
-@@:
+	lea rax,@@L335
+	push rax
 	xor edx,edx
 	mov [longarg],dl
 	mov bl,1
@@ -124,22 +110,18 @@ formatitem:
 	inc rsi
 @@:
 	mov [fillchr],ecx
-	mov [size_],edx
 	mov ebx,edx
 
 	.while ( byte ptr [rsi] >= '0' && byte ptr [rsi] <= '9' )
 		lodsb
 		sub al,'0'
-		movzx rax,al
-		imul rcx,rbx,10		;ecx = ebx * 10
-		add rax,rcx
-		mov rbx,rax
+		movzx eax,al
+		imul ecx,ebx,10		;ecx = ebx * 10
+		add eax,ecx
+		mov ebx,eax
 	.endw
 
 	mov [size_],ebx
-	cmp BYTE PTR [rsi],'l'
-	jne @F
-	inc rsi
 	cmp byte ptr [rsi],'l'
 	jne @F
 	mov [longarg],1
@@ -147,8 +129,6 @@ formatitem:
 @@:
 	lodsb
 	mov [fmt],rsi
-	or al,al
-	je done
 	cmp al,'x'
 	je handle_x
 	cmp al,'X'
@@ -161,10 +141,18 @@ formatitem:
 	je handle_d
 	cmp al,'p'
 	je handle_p
+	cmp al,'c'
+	je handle_c
+	and al,al
+	jnz @F
+	pop rax
+	jmp done
 handle_c:
-	invoke handle_char, dword ptr [rdi]
+	mov al,[rdi]
 	add rdi,8
-	jmp @@L335
+@@:
+	invoke handle_char, eax
+	retn
 
 handle_s:
 	mov rsi,[rdi]
@@ -172,15 +160,15 @@ handle_s:
 	jmp print_string
 
 handle_d:
-	mov base,-10
+	mov ebx,-10
 	jmp handlenum
 handle_u:
-	mov base,10
+	mov ebx,10
 	jmp handlenum
 handle_p:
 	mov longarg,1
 handle_x:
-	mov base,16
+	mov ebx,16
 handlenum:
 	cmp [longarg],0
 	je @F
@@ -188,45 +176,43 @@ handlenum:
 	jmp num2str
 @@:
 	mov eax,[rdi]
-	cmp base,-10
+	cmp ebx,-10
 	jnz @F
 	movsxd rax,dword ptr [rdi]
 @@:
 num2str:
 	add rdi,8
-	lea rbx,[szTmp]
-	invoke ltoa, rax, rbx, base
+	lea rsi,szTmp
+	invoke ltoa, rax, rsi, ebx
 	mov rsi,rax
+
 print_string:		;print string RSI
-	invoke strlen, rsi
-	sub [size_],eax
-	cmp [flag],1
-	jne print_string_chars
+	mov rax,rsi
+	mov ebx,size_
+	.while byte ptr [rsi]
+		inc rsi
+	.endw
+	sub rsi,rax
+	xchg rax,rsi
+	sub ebx, eax
+	.if flag == 1
+		.while sdword ptr ebx > 0
+			invoke handle_char, fillchr	;print leading filler chars
+			dec ebx
+		.endw
+	.endif
 
-	mov ebx,[size_]
-	jmp @@L363
-nextfchar:
-	invoke handle_char, fillchr	;print leading filler chars
-	dec ebx
-@@L363:
-	or ebx,ebx
-	jg nextfchar
-	mov [size_],ebx
-
-print_string_chars:
-
-	.while (byte ptr [rsi])
+	.while byte ptr [rsi]
 		lodsb
 		invoke handle_char, eax	;print char of string
 	.endw
 
-	mov ebx,[size_]
-@@:
-	or ebx,ebx
-	jle @@L335
-	invoke handle_char, fillchr	;print trailing spaces
-	dec ebx
-	jmp @B
+	
+	.while sdword ptr ebx > 0
+		invoke handle_char, fillchr	;print trailing spaces
+		dec ebx
+	.endw
+	retn
 
 printf ENDP
 

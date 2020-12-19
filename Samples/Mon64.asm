@@ -1,6 +1,7 @@
 
 ;--- this is a sample showing how a 64-bit binary
 ;--- may look that can be loaded by dos64stb.bin.
+;--- needs JWasm v2.14+ (invoke register argument translation).
 
 ;--- the .x64 directive is not really needed.
 ;--- it is here so we don't have to use the -win64

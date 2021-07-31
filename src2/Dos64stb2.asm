@@ -25,7 +25,7 @@ DGROUP group _TEXT	;makes a tiny model
 
 ?MPIC  equ 78h	; master PIC base, remapped to 78h
 ?SPIC  equ 70h	; slave PIC, isn't changed
-?RESETLME equ 0;1=(re)set EFER.LME for temp switch to real-mode
+?RESETLME equ 1;1=(re)set EFER.LME for temp switch to real-mode
 ?RESETPAE equ 1;1=(re)set CR4.PAE  for temp switch to real-mode
 ?SETCR3   equ 1;1=set CR3 after temp switch to real-mode
 ?IDTADR   equ 100000h	;address of IDT
@@ -93,11 +93,12 @@ GDT dq 0                ; null descriptor
     dw -1,0,9200h,0h    ; 16-bit, 64k data descriptor
     dw -1,0,9A00h,0h    ; 16-bit, 64k code descriptor
     dw -1,0,9200h,0CFh  ; 32-bit flat data descriptor, used for unreal mode only
+sizeGDT equ $-GDT       ; PluM modification 31 July 2021 (make it more generic)
 
     .data
 
 GDTR label fword        ; Global Descriptors Table Register
-    dw 5*8-1            ; limit of GDT (size minus one)
+    dw sizeGDT-1        ; limit of GDT (size minus one)
     dd offset GDT       ; linear address of GDT
 IDTR label fword        ; IDTR in long mode
     dw 256*16-1         ; limit of IDT (size minus one)
@@ -678,25 +679,26 @@ readsection endp
 
 backtoreal proc
 
-    mov eax,cr0
-    and eax,7ffffffeh   ; disable protected-mode & paging
-    mov cr0,eax
-    jmp far16 ptr @F
-@@:
+;--- PluM refactoring 31 July 2021
+    call switch2rm
+
 @@exit2::
     mov ax, cs
     mov ss, ax          ; SS=DGROUP
     mov ds, ax          ; DS=DGROUP
-    @lidt [nullidt]     ; IDTR=real-mode compatible values
 
+if ?RESETLME eq 0
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     and ah,0feh         ; disable long mode (EFER.LME=0)
     wrmsr
+endif
 
+if ?RESETPAE eq 0
     mov eax,cr4
     and al,0DFh         ; reset bit 5, disable PAE paging
     mov cr4,eax
+endif
 
     mov dx,7008h
     call setpic
@@ -730,12 +732,10 @@ backtoreal endp
 ;--- switch to real-mode
 
 switch2rm proc
-;--- disable paging & protected-mode
+;--- disable paging first (PluM modification)
     mov eax,cr0
-    and eax,7ffffffeh
+    and eax,7fffffffh
     mov cr0, eax
-    jmp far16 ptr @F
-@@:
 ;--- disable long mode
 if ?RESETLME
     mov ecx,0C0000080h  ; EFER MSR
@@ -748,6 +748,13 @@ if ?RESETPAE
     and al,0DFh         ; reset bit 5, disable PAE paging
     mov cr4,eax
 endif
+;--- PluM modification: now disable protection
+;--- TODO: (or switch to VM86 mode)
+    mov eax, cr0
+    and al, 0feh
+    mov cr0, eax
+    jmp far16 ptr @F
+@@:
     @lidt cs:[nullidt]  ; IDTR=real-mode compatible values
     ret
 switch2rm endp
@@ -770,12 +777,8 @@ if ?RESETPAE
     mov cr4,eax
 endif
 if ?SETCR3
-;    mov eax,cr3        ; useless to check if CR will change because
-;    cmp eax,cs:pPML4   ; turning paging off has reset the TLB
-;    jz @F
     mov eax,cs:pPML4
     mov cr3,eax
-;@@:
 endif
 ;--- enable protected-mode + paging
     mov eax,cr0
@@ -1026,6 +1029,10 @@ long_start proc
 ;--- ensure ss is valid!
     mov ax,SEL_DATA16
     mov ss,eax
+;--- PluM modification 31 July 2021:
+;--- and fs/gs so we don't triple-fault trying to save/restore them in IRQs!
+    mov fs,eax
+    mov gs,eax
 
 ;--- linear address of image start (=PE header) should be in edx::ebx
 ;--- move it to rbx using registers only.
@@ -1216,10 +1223,22 @@ endif
 @call_rm_irq macro procname, interrupt
 procname proc
     push eax
-if ?RESETLME
     push ecx
     push edx
-endif
+;--- PluM modification 31 July 2021: 
+;--- Save FS and GS (selectors + bases) since "usermode" may use them
+    mov ecx, 0c0000100h ; fs base
+    rdmsr
+    push edx
+    push eax
+    push fs
+
+    mov ecx, 0c0000101h ; gs base
+    rdmsr
+    push edx
+    push eax
+    push gs
+
     call switch2rm  ;modifies eax [, ecx, edx]
 ;--- SS still holds a selector - hence a possible temporary 
 ;--- stack switch inside irq handler would cause a crash.
@@ -1227,10 +1246,23 @@ endif
     int interrupt
     cli
     call switch2pm  ;modifies eax [, ecx, edx]
-if ?RESETLME
+
+;--- PluM modification 31 July 2021: 
+;--- Restore FS and GS since "usermode" may use them
+    pop gs
+    mov ecx, 0c0000101h ; gs base
+    pop eax
+    pop edx
+    wrmsr
+
+    pop fs
+    mov ecx, 0c0000100h ; fs base
+    pop eax
+    pop edx
+    wrmsr
+
     pop edx
     pop ecx
-endif
     pop eax
     retd
 procname endp

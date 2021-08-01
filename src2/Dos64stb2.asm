@@ -29,6 +29,17 @@ DGROUP group _TEXT	;makes a tiny model
 ?RESETPAE equ 1;1=(re)set CR4.PAE  for temp switch to real-mode
 ?SETCR3   equ 1;1=set CR3 after temp switch to real-mode
 ?IDTADR   equ 100000h	;address of IDT
+?DFSTKADR equ (1 shl 47) - 8	;address of double-fault stack for TSS
+?KSTKADR  equ ?DFSTKADR - 100h	;address of "kernel" stack for TSS
+
+KSTKBTM   equ ?KSTKADR and not 0fffh
+DFSTKBTM  equ ?DFSTKADR and not 0fffh
+
+if KSTKBTM ne DFSTKBTM
+EXTRASTKPGS equ 2
+else
+EXTRASTKPGS equ 1
+endif
 
 EMM struct  ;XMS block move help struct
 _size  dd ?
@@ -79,20 +90,41 @@ endm
 
 ;--- 16bit start/exit code
 
-SEL_CODE64 equ 1*8
-SEL_DATA16 equ 2*8
-SEL_CODE16 equ 3*8
-SEL_FLAT   equ 4*8
-
     .code
 
     assume ds:DGROUP
 
+;--- PluM modification 1 August 2021: add TSS
+TSS	dd 0	;reserved
+RSP_r0	dq ?KSTKADR
+RSP_r1	dq 0
+RSP_r2	dq 0
+pPML4	label dword
+TSS_CR3	dq 0	;technically reserved, but might come in handy...
+IST1	dq ?DFSTKADR
+IST2	dq 0
+IST3	dq 0
+IST4	dq 0
+IST5	dq 0
+IST6	dq 0
+IST7	dq 0
+	dq 0	;reserved
+	dw 0	;reserved
+IOPB	dw 0DFFFh;max possible to make sure there is NO IOBP!
+sizeTSS equ $-TSS
+
 GDT dq 0                ; null descriptor
+SEL_CODE64 equ $-GDT
     dw -1,0,9A00h,0AFh  ; 64-bit code descriptor
+SEL_DATA16 equ $-GDT
     dw -1,0,9200h,0h    ; 16-bit, 64k data descriptor
+SEL_CODE16 equ $-GDT
     dw -1,0,9A00h,0h    ; 16-bit, 64k code descriptor
+SEL_FLAT equ $-GDT
     dw -1,0,9200h,0CFh  ; 32-bit flat data descriptor, used for unreal mode only
+SEL_TSS equ $-GDT
+    dw sizeTSS-1,offset TSS,8900h,40h
+    dq 0		; TSS descriptor 16 bytes in long mode??
 sizeGDT equ $-GDT       ; PluM modification 31 July 2021 (make it more generic)
 
     .data
@@ -110,7 +142,7 @@ nullidt label fword     ; IDTR for real-mode
 xmsaddr dd 0
 dwCSIP  label dword
 adjust  dd 0
-pPML4   dd 0
+;pPML4   dd 0
 retad   label fword
         dd 0
         dw SEL_CODE64
@@ -189,9 +221,14 @@ start16 proc
     add dword ptr [GDTR+2], eax ; convert offset to linear address
     mov word ptr [GDT + SEL_DATA16 + 2], ax
     mov word ptr [GDT + SEL_CODE16 + 2], ax
+    add word ptr [GDT + SEL_TSS + 2], ax
+    pushf
+
     shr eax,16
     mov byte ptr [GDT + SEL_DATA16 + 4], al
     mov byte ptr [GDT + SEL_CODE16 + 4], al
+    popf
+    adc byte ptr [GDT + SEL_TSS + 4], al
 
     smsw ax
     test al,1
@@ -308,8 +345,10 @@ start16 proc
 ;--- 3 for remainder of PDPT,PD,PT
 ;--- 1 for PML4
 ;--- 3 (PT,PD,PDPT) for mapping DOS conventional memory
+;--- PluM (1 August): 1/2 for alt stacks (particularly for double fault)
+;--- 3 (PT,PD,PDPT) to point at the alt stacks
 ;--- 1 extra page that may be needed to align to page boundary
-    add edx,3+1+3+1
+    add edx,3+1+3+EXTRASTKPGS+3+1
 
     test edx,0C0000000h
     mov bp,CStr("too much extended memory needed")
@@ -394,6 +433,14 @@ start16 proc
     mov eax, ?IDTADR
     mov dword ptr [IDTR+2], eax
     invoke MapPages, 1, ?IDTADR, ecx
+
+;--- PluM modification 1 August: create alt stack(s)
+    add PhysCurr,1000h
+    invoke MapPages, 1, KSTKBTM, PhysCurr
+if EXTRASTKPGS eq 2
+    add PhysCurr,1000h
+    invoke MapPages, 1, DFSTKBTM, PhysCurr
+endif
 
     mov eax,PhysCurr
     mov ecx,ImgSize
@@ -762,6 +809,7 @@ switch2rm endp
 ;--- switch to protected-mode
 
 switch2pm proc
+    and byte ptr cs:[GDT+SEL_TSS+5], 0FDh ; clear busy bit
     @lgdt cs:[GDTR]
     @lidt cs:[IDTR]
 ;--- (re)enable long mode
@@ -784,6 +832,8 @@ endif
     mov eax,cr0
     or eax,80000001h
     mov cr0,eax
+    mov ax, SEL_TSS
+    ltr ax
     ret
 switch2pm endp
 
@@ -853,6 +903,10 @@ make_exc_gates:
     mov ax,SEL_CODE64
     stosw
     mov ax,8E00h
+    cmp ecx, 20	; 32-0Ch - i.e. this is the double-fault gate
+    jne @F
+    mov al,1	; PluM modification 1 Aug: IST 1
+@@:
     stosd
     xor eax, eax
     stosd
@@ -870,7 +924,7 @@ make_exc_gates:
     lea di,[di+?MPIC*16]
     mov cx,8
     mov edx,offset Irq0007
-    mov si, 8E00h
+    ;mov si, 8E00h ; PluM 1 August 2021: this would turn on interrupts in IRQ handlers - that can't be right (causes races)
     call make_int_gates
     pop di
     lea di,[di+?SPIC*16]
@@ -1047,9 +1101,12 @@ long_start proc
     mov ecx,[rbx].IMAGE_NT_HEADERS.OptionalHeader.SizeOfImage
     add rcx,[rbx].IMAGE_NT_HEADERS.OptionalHeader.SizeOfStackReserve
     lea rsp,[rcx+rbx]
-    sti             ; stack pointer ok, interrupts can be used
 
-;   call baserelocs	; handle base relocations
+;--- PluM modification 1 August 2021: setup TSS for alt stacks etc.
+    mov ax,SEL_TSS
+    ltr ax
+
+    sti             ; stack pointer(s) ok, interrupts can be used
 
     mov esi,[rbx].IMAGE_NT_HEADERS.OptionalHeader.AddressOfEntryPoint
     add rsi,rbx
@@ -1158,7 +1215,6 @@ WriteNb:
     jmp WriteChr
 
 ;--- exception handler
-;--- might not work for exception 0Ch, since stack isn't switched.
 
 exception:
 excno = 0

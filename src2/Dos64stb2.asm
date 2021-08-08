@@ -1476,10 +1476,13 @@ make_exc_gates:
     mov ax,SEL_CODE64
     stosw
     mov ax,8E00h
-    cmp ecx, 20	; 32-0Ch - i.e. this is the double-fault gate
-    jne @F
-    mov al,1	; PluM modification 1 Aug: IST 1
+    cmp ecx, 24	; 32-8 - i.e. this is the double-fault gate
+    je @F
+    cmp ecx, 20	; 32-0Ch - i.e. this is the stack-fault gate
+    jne @@ist_set
 @@:
+    mov al,1	; IST 1 - TODO: Different ISTs for #SS and #DF?
+@@ist_set:
     stosd
     xor eax, eax
     stosd

@@ -99,7 +99,7 @@ TSS	dd 0	;reserved
 RSP_r0	dq ?KSTKADR
 RSP_r1	dq 0
 RSP_r2	dq 0
-pPML4	label dword
+pRealPML4 label dword
 TSS_CR3	dq 0	;technically reserved, but might come in handy...
 IST1	dq ?DFSTKADR
 IST2	dq 0
@@ -126,6 +126,24 @@ SEL_TSS equ $-GDT
     dw sizeTSS-1,offset TSS,8900h,40h
     dq 0		; TSS descriptor 16 bytes in long mode??
 sizeGDT equ $-GDT       ; PluM modification 31 July 2021 (make it more generic)
+SEL_VCPICODE equ $-GDT
+    dq 3 dup (0)	; VCPI allocates three 8-byte descriptors
+sizeGDT_VCPI equ $-GDT
+
+;--- PluM modification 2 August 2012: VCPI control structure
+vcpiCR3	dd 0		; not the long-mode CR3, a 32-bit one!
+vcpiGDT dd offset GDTR
+vcpiIDT	dd offset IDTR
+vcpiLDT dw 0
+vcpiTSS dw SEL_TSS
+vcpiEIP dd offset vcpi_switchOK
+vcpiCS	dw SEL_CODE16
+
+;--- *physical* EMS pages used for setting up the 32-bit page tables
+EMSPG_PD equ 0		; always keep the PD in page 0
+EMSPG_PT equ 1		; keep the current PT in page 1
+EMSPG_DATA equ 2	; use page 2 to copy data and lookup physical addxs
+
 
     .data
 
@@ -142,11 +160,16 @@ nullidt label fword     ; IDTR for real-mode
 xmsaddr dd 0
 dwCSIP  label dword
 adjust  dd 0
-;pPML4   dd 0
+pPML4   dd 0
+LinBase	dd 100000h	; first linear addx that "we own" (1 MiB by default)
 retad   label fword
         dd 0
         dw SEL_CODE64
 xmshdl  dw -1
+vcpiint	label fword
+vcpiadr dd -1
+	dw SEL_VCPICODE
+emshdl  dw -1
 fhandle dw -1
 
     .data?
@@ -181,6 +204,7 @@ endif
     .code
 
 MapPages proto stdcall pages:dword, linaddr:qword, physaddr:dword
+MapEMS4kPage proto stdcall pagenum:dword, physpage:byte
 
 start16 proc
 
@@ -219,6 +243,8 @@ start16 proc
     movzx eax,ax
     shl eax,4
     add dword ptr [GDTR+2], eax ; convert offset to linear address
+    add [vcpiGDT], eax		; convert offset to linear address
+    add [vcpiIDT], eax		; convert offset to linear address
     mov word ptr [GDT + SEL_DATA16 + 2], ax
     mov word ptr [GDT + SEL_CODE16 + 2], ax
     add word ptr [GDT + SEL_TSS + 2], ax
@@ -230,16 +256,47 @@ start16 proc
     popf
     adc byte ptr [GDT + SEL_TSS + 4], al
 
-    smsw ax
-    test al,1
-    mov bp,CStr("Mode is V86. Need REAL mode to switch to LONG mode!")
-    jnz @@error
+;--- PluM 2 August 2021: do this first, so EMS v XMS code can be grouped
     xor edx,edx
     mov eax,80000001h   ; test if long-mode is supported
     cpuid
     bt edx,29
     mov bp,CStr("No 64bit cpu detected.")
     jnc @@error
+
+    smsw ax
+    test al,1
+    jz @@checkxms
+;--- in vm86 mode - check if there's EMS / VCPI
+    mov bp,CStr("Mode is V86, no VCPI. Need REAL mode to switch to LONG mode!")
+    mov dx,CStr("EMMXXXX0")
+    mov ax,3D00h	; open read-only
+    int 21h
+    jc @@error
+    mov bx,ax
+    mov ax,4400h	; get device information
+    int 21h
+    jc @@error
+    test dx,80h		; is it a device?
+    jz @@error
+    mov ax,4407h	; get device output status
+    int 21h
+    push ax
+    mov ah,3Eh		; close
+    int 21h
+    pop ax
+    cmp al,0FFh		; device ready?
+    jne @@error
+;--- so we have EMS, but does it support VCPI?
+    mov ax,0DE00h	; vcpi check
+    int 67h
+    test ah,ah
+    jnz @@error
+;--- we have VCPI, so we need three more descriptors in our GDT!
+    mov word ptr [GDTR], sizeGDT_VCPI-1
+    jmp @@havexms_ems
+
+@@checkxms:
     mov ax,4300h
     int 2fh         ;XMS host available?
     test al,80h
@@ -253,6 +310,7 @@ start16 proc
     mov ah,5        ;local enable A20
     call xmsaddr
 
+@@havexms_ems:
     push ds
     lds dx,fname
     mov ax,3D00h
@@ -346,17 +404,22 @@ start16 proc
 ;--- 1 for PML4
 ;--- 3 (PT,PD,PDPT) for mapping DOS conventional memory
 ;--- PluM (1 August): 1/2 for alt stacks (particularly for double fault)
-;--- 3 (PT,PD,PDPT) to point at the alt stacks
+;--- 3/6 (PT,PD,PDPT)*1/2 to point at the alt stacks
 ;--- 1 extra page that may be needed to align to page boundary
-    add edx,3+1+3+EXTRASTKPGS+3+1
+    add edx,3+1+3+(EXTRASTKPGS*4)+1
 
     test edx,0C0000000h
     mov bp,CStr("too much extended memory needed")
     jnz @@error
-    push edx
-    shl edx,2
 
+;--- are we using EMS or XMS?
+    cmp word ptr [GDTR], sizeGDT_VCPI-1
+    je @@ems_alloc
+
+@@xms_alloc:
 ;--- allocate the extended memory block needed for image + systabs
+    push edx
+    shl edx,2 ; convert pages to KiB
     mov ah,89h
     call xmsaddr
     cmp ax,1
@@ -393,6 +456,7 @@ start16 proc
     add eax, ebx
     mov PhysBase, eax
     mov pPML4, eax      ; allocate the first page for PML4
+    mov pRealPML4, eax  ; in XMS mode, physical and "unreal" addxs are the same
     add eax,1000h
     mov PhysCurr, eax	; start of free physical pages
 
@@ -402,9 +466,6 @@ start16 proc
     mov word ptr emm.srcofs+2, ds
     mov word ptr emm2.srcofs+0, sp
     mov word ptr emm2.srcofs+2, ss
-
-;---  map conventional memory
-    invoke MapPages, 256, 0, 0
 
 ;--- setup ebx/rbx with linear address of _TEXT64
 
@@ -433,6 +494,198 @@ start16 proc
     mov eax, ?IDTADR
     mov dword ptr [IDTR+2], eax
     invoke MapPages, 1, ?IDTADR, ecx
+    jmp @@allocdone
+
+@@ems_alloc:
+;--- need additional pages in EMS mode:
+;--- N/1024 + 1 to map them all in a linear 32-bit space
+;--- 2 for VCPI page table and directory pointing to all of the above
+;--- 3 to round up to nearest 16-kiB EMS page!
+    push edx      ; save number of pages we'll need to map in 32-bit mode
+    mov eax,edx
+    shr eax,10    ; convert pages to page-tables
+    add edx,eax
+    add edx,1+2+3 ; PT for remainder + VCPI page table + directory + round-up
+    shr edx,2     ; convert to EMS pages
+    test edx,0FFFF0000h
+    mov bp,CStr("too much expanded memory needed")
+    jnz @@error
+
+    mov ebx,edx
+    mov ah,43h ; allocate pages
+    int 67h
+    test ah,ah
+    mov bp,CStr("EMS memory allocation failed.")
+    jnz @@error
+    mov emshdl, dx
+
+;--- use FS for the frame ("frame segment"!)
+    mov ah,41h ; get page frame address
+    int 67h
+    test ah,ah
+    mov bp,CStr("EMS page frame inaccessible.")
+    jnz @@error
+    mov fs,bx ; frame segment - don't mess with it until done with MapEMS4kPage
+
+    pop ebp   ; number of pages to map; or, first page of 32-bit mapping set
+;--- start out by mapping pages for the following into the EMS frame:
+;--- * 32-bit PD (on the ebp-th 4K page)
+;--- * First 32-bit PT, to be filled out by VCPI (on the ebp+1-th page)
+;--- * The first four 4K pages (i.e. first EMS page), for the IDT and PML4
+    invoke MapEMS4kPage, ebp, EMSPG_PD
+    jc @@emserr
+    push es
+    pop gs           ; use GS for the PD
+    mov vcpiCR3, eax ; physical addx of 32-bit PD
+;--- clear the PD
+    xor di,di
+    mov cx,400h
+    xor eax,eax
+    rep stosd
+
+    lea edx, [ebp+1]
+    invoke MapEMS4kPage, edx, EMSPG_PT
+    jc @@emserr
+;--- clear the PT
+    xor di,di
+    mov cx,400h
+    xor eax,eax
+    rep stosd
+    push es          ; we'll use this again in a minute
+
+    invoke MapEMS4kPage, 0, EMSPG_DATA
+    jc @@emserr
+    mov pRealPML4, eax ; we'll use the first page for our PML4 in Long Mode
+    mov ebx, es
+    shl ebx, 4
+    mov pPML4, ebx     ; in the 32-bit addx space, the PML4 will be fixed here
+;--- clear the PML4
+    xor di,di
+    mov cx,400h
+    xor eax,eax
+    rep stosd
+
+;--- and we'll put the IDT on the next page
+    add ebx, 1000h
+    mov dword ptr [IDTR+2], ebx
+;--- setup ebx/rbx with linear address of _TEXT64
+    mov ebx,seg long_start
+    shl ebx,4
+    add [llgofs], ebx
+    call createIDT
+
+    mov ax,0DE01h                  ; get protected mode interface
+    pop es
+    xor edi,edi                    ; ES:(E)DI points to first PT
+    mov si,offset GDT+SEL_VCPICODE ; DS:SI points to descriptors
+    int 67h
+    mov vcpiadr, ebx
+    mov ecx,edi
+    shr ecx,2                      ; convert to page count
+;--- clear bits 9-11 of all the PT entries, as per the VCPI standard
+@@:
+    and byte ptr es:[ecx*4-3],0F1h ; byte index n*4 - 3, where n > 0
+    loop @B
+    shl edi,10                     ; convert from dword count to linear addx
+    mov LinBase, edi
+;--- now the ebp+1-th 4K page contains a 32-bit page table mapping the first 1~4
+;--- MiB exactly as they are now - i.e. with the 32-bit PD @ GS*16, the first
+;--- 32-bit PT @ ES*16, and the 64-bit PML4 @ pPML4.
+
+    mov ebx,es
+    shr ebx,6 ; convert segment address to PT offset (left 4, right 12, left 2)
+    mov eax,es:[ebx] ; get the PT entry corresponding to the PT itself
+    mov gs:[0],eax   ; and fill it into the first entry of the PD
+    mov ebx,gs
+    shr ebx,6
+    mov eax,es:[ebx]   ; get the PT entry corresponding to the PD
+    mov gs:[0FFCh],eax ; and fill it into the last entry to get a recursive map
+
+;--- initialize the loop ready to pull in the next page table (DI>=1000h),
+;--- and start mapping from the 2nd (ESI=2) zero-relative 4K page in the EMS map
+    mov di,1000h
+    mov esi,2
+
+    .while esi < ebp
+;------- save far pointer to the next position in the current page table
+        push es
+        push di
+
+;------- map in the next 4K page to the EMS page frame
+        invoke MapEMS4kPage, esi, EMSPG_DATA
+        jc @@emserr
+;------- now ES:DI is a far pointer to the 4K page, and EAX is its physical addx
+        push eax    ; save physical addx
+        xor eax,eax
+        xor di,di
+        mov cx,400h
+        rep stosd   ; clear the page
+
+        pop eax
+;------- restore far pointer to the next position in the current page table
+        pop di
+        pop es
+
+        .if di >= 1000h ; past the end of the page table?
+            push eax    ; save physical addx again
+            push esi    ; save page number
+
+            shr esi,10  ; convert to page table count
+;----------- The ebp-th 4K page is the PD, and the ebp+1-th is the first PT,
+;----------- which was filled by VCPI. So, our own PTs start from the ebp+2-th.
+            push esi
+            lea esi,[esi+ebp+2]
+            invoke MapEMS4kPage, esi, EMSPG_PT
+            jc @@emserr
+
+            pop esi           ; get back to page table count
+            lea esi,[esi*4+4] ; convert to page directory offset (skipping 0)
+            or eax,11b        ; stamp as R/W and present
+            mov gs:[esi],eax  ; save physical address of PT into PD
+
+;----------- clear the PT
+            xor di,di
+            mov cx,400h
+            xor eax,eax
+            rep stosd
+
+            pop esi     ; restore index of current 4K page
+            pop eax     ; and its physical addx
+
+            mov edi,esi
+            and edi,3FFh; get its index in the current PT
+            shl di,2    ; and convert to offset
+        .endif
+
+        or eax,11b  ; stamp as R/W and present
+        stosd       ; save physical address of page into PT
+
+        inc esi     ; next page
+    .endw
+
+    push ds
+    pop es ; restore tiny model
+
+;--- all going well, our 32-bit memory map now looks like this:
+;--- 00000000-00100000: first MiB exactly as it was when we called int 67h DE01h
+;--- -----------------: (including our 64-bit PML4 and IDT)
+;--- 00100000-00400000: *may* also have been mapped by int 67h DE01h
+;--- 00400000-00402000: unmapped (!)
+;--- 00402000-XXXXX000: blank EMS memory, ready to fill with data
+;--- XXXXX000-FFC00000: unmapped (where XXXXX = EBP + 400h)
+;--- FFC00000-00000000: the 32-bit page tables
+
+    mov PhysBase, 400000h ; this addx isn't actually "physical" in EMS mode,
+    mov PhysCurr, 402000h ; but using these should accomplish what we need
+
+;--- point at stack buffer (which was *not* used for the IDT in this mode!)
+    mov di,sp
+
+@@allocdone:
+;---  map conventional memory
+    mov ebx,[LinBase]
+    shr ebx,12 ; convert to page count
+    invoke MapPages, ebx, 0, 0
 
 ;--- PluM modification 1 August: create alt stack(s)
     add PhysCurr,1000h
@@ -526,9 +779,6 @@ endif
 
     cli
 
-    mov eax, pPML4
-    mov cr3, eax        ; load page-map level-4 base
-
 if ?MPIC ne 8
     in al,21h
     mov bPICM,al
@@ -539,8 +789,23 @@ if ?SPIC ne 70h
 endif
     mov dx,?SPIC shl 8 or ?MPIC
     call setpic
+
+    cmp word ptr [GDTR], sizeGDT_VCPI-1
+    je @F
     @lgdt [GDTR]
     @lidt [IDTR]
+    jmp @@setCR3_4
+
+@@:
+    call vcpi_switch2pm
+;--- turn off paging temporarily to reconfigure it for 64-bit mode...
+    mov eax,cr0
+    and eax,7fffffffh
+    mov cr0,eax
+
+@@setCR3_4:
+    mov eax, pRealPML4
+    mov cr3, eax        ; load page-map level-4 base
 
     mov eax,cr4
     or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
@@ -564,6 +829,8 @@ endif
     db 66h,0eah         ; jmp far32
 llgofs dd offset long_start
     dw SEL_CODE64
+@@emserr::
+    mov bp,CStr("Failed to map EMS page")
 @@error::
     mov si,bp
 nextchar:
@@ -578,7 +845,7 @@ newline db 13,10,'$'
 done:
     mov dx,offset newline
     mov ah,9
-    int 21
+    int 21h
     jmp @@exit
 myint23:
     iret
@@ -616,15 +883,17 @@ MapPages proc stdcall uses es pages:dword, linaddr:qword, physaddr:dword
         .if (edx == 0)             ;does PDPTE/PDE/PTE exist?
             mov edx,PhysCurr
             add PhysCurr,1000h
-            or dl,11b
+            call AddrToPageMap
             mov es:[ebx+eax],edx
 ;           mov es:[ebx+eax+4],x   ;if phys ram > 4 GB is used
         .endif
         pop eax
         and eax,0ff8h
         mov ebx,edx
-;       and bx,0FC00h
-        and bx,0F000h
+        call PageMapToAddr
+        cmp ebx,-1
+        stc
+        je exit
         loop @B
 
         test byte ptr es:[ebx+eax],1     ;something already mapped there?
@@ -632,7 +901,7 @@ MapPages proc stdcall uses es pages:dword, linaddr:qword, physaddr:dword
         jnz exit
         mov edx,physaddr
         add physaddr,1000h
-        or dl,11b
+        call AddrToPageMap
         mov es:[ebx+eax],edx
 ;       mov dword ptr es:[ebx+eax+4],x	;if phys ram > 4 GB is used
         add dword ptr linaddr+0,1000h
@@ -641,12 +910,157 @@ MapPages proc stdcall uses es pages:dword, linaddr:qword, physaddr:dword
     .endw
     clc
 exit:
+    call DisableUnreal
     ret
 
 MapPages endp
 
+;--- obtain a first-megabyte-memory mapping of the pagenum-th *4K page* in EMS,
+;--- within the physpage-th "physical" EMS page, point ES at that 4K page, and
+;--- give its physical address in EAX
+;--- * EXPECTS EMS PAGE FRAME in FS *
+
+MapEMS4kPage proc stdcall uses ebx ecx edx pagenum:dword, physpage:byte
+
+    mov ah,44h ; map handle page
+    mov al,physpage
+    mov ebx,pagenum
+    shr ebx,2  ; convert 4K page number to EMS page
+    mov dx,cs:emshdl
+    int 67h
+    test ah,ah
+    jnz @F
+
+    mov ebx,fs
+    movzx eax,physpage
+    shl eax,10 ; convert 16K page size to segment delta
+    add ebx,eax; now EBX is a segment pointing at the base of the EMS page
+
+    mov eax,pagenum
+    and eax,3  ; get the index of the requested 4K page, within this EMS page
+    shl eax,8  ; convert 4K page size to segment delta
+    add ebx,eax
+    mov es,ebx
+
+;--- now get its physical addx
+    mov ecx,ebx
+    shr ecx,8     ; convert back to a 4K page idx
+    mov ax,0DE06h ; get physical addx of page in first MiB
+    int 67h
+    test ah,ah
+    jnz @F
+
+    mov eax,edx
+    and eax,NOT 0FFFh
+    clc
+    ret
+
+@@:
+    xor eax,eax
+    stc
+    ret
+
+MapEMS4kPage endp
+
+;--- Instead of "unreal mode", when using VCPI, we go into actual protected mode
+;--- and map all EMS memory into contiguous space compatible with the non-VCPI
+;--- program logic. This function converts the addresses in this space to actual
+;--- physical addresses.
+
+AddrToPageMap proc
+
+    cmp word ptr [GDTR], sizeGDT_VCPI-1
+    je @F
+    or dl,11b ; XMS mode - addx is already physical, just stamp as Present + RW
+    ret
+
+@@:
+    shr edx,10       ; convert to page table offset
+    sub edx,1 SHL 22 ; all page tables mapped into upper 4 MiB of addx space
+    push edx
+    sar edx,10       ; get the corresponding PD entry (in upper 4 kiB of space)
+    and edx,NOT 3
+    test byte ptr es:[edx],1
+    jz @F            ; no PD entry - defer #PF until we get to long mode!
+    pop edx
+    and edx,NOT 3
+    mov edx,es:[edx] ; get the addx + control bits from the page table
+    ret
+
+@@:
+    add sp,4
+    xor edx,edx
+    ret
+
+AddrToPageMap endp
+
+;--- Inverse of the above. In XMS mode, blanks lower 12 bits of EBX. In EMS/VCPI
+;--- mode, walks the 32-bit page tables to find what's mapped to the physical
+;--- addx in EBX, and returns the linear addx in EBX.
+
+PageMapToAddr proc
+
+;   and bx,0FC00h
+    and bx,0F000h
+    cmp word ptr [GDTR], sizeGDT_VCPI-1
+    je @F
+    ret
+
+@@:
+    push eax
+    push edi
+    push cx
+    xor eax,eax
+    mov edi,-1000h   ; PD mapped into upper 4 kiB of addx space
+    mov cx,400h
+@@nextPT:
+    repz scasd
+    push esi
+    push eax
+    push cx
+    mov esi,edi
+    sub esi,4        ; Back to the one we just scanned over
+    shl esi,10       ; Go to corresponding PT in upper 4 MiB
+    mov cx,400h
+@@:
+    lods dword ptr es:[esi]
+    and ax,NOT 0FFFh
+    cmp eax,ebx
+    loopne @B
+    je @F
+    pop cx
+    pop eax
+    pop esi
+    jcxz @@notfound
+    jmp @@nextPT
+
+@@:
+;--- found the right addx
+    sub esi,4        ; Back to the one we just scanned over
+    mov ebx,esi
+    shl ebx,10
+    add esp,6
+    pop esi
+    pop cx
+    pop edi
+    pop eax
+    ret
+
+@@notfound:
+    xor ebx,ebx
+    dec ebx
+    pop cx
+    pop edi
+    pop eax
+    ret
+
+PageMapToAddr endp
+
 EnableUnreal proc
     cli
+    cmp word ptr [GDTR], sizeGDT_VCPI-1
+    je @@unreal_vcpi
+
     @lgdt [GDTR]
     mov eax,cr0
     or al,1
@@ -663,7 +1077,30 @@ EnableUnreal proc
     xor ax,ax
     mov es,ax
     ret
+
+@@unreal_vcpi:
+;--- don't actually enable unreal mode, just put us in temporary protected mode
+;--- with a flat selector in ES, and *no interrupts*!
+    call vcpi_switch2pm
+    push SEL_FLAT
+    pop es
+    ret
 EnableUnreal endp
+
+DisableUnreal proc
+    pushf ; preserve carry state
+    cmp word ptr [GDTR], sizeGDT_VCPI-1
+    je @F
+    popf
+    ret ; XMS mode - unreal is harmless
+
+@@:
+;--- back to VM86 and enable interrupts
+    call vcpi_switch2vm86
+    popf
+    sti
+    ret
+DisableUnreal endp
 
 ;--- copy cx bytes to extended memory
 ;--- ds:si -> emm struct
@@ -671,10 +1108,59 @@ EnableUnreal endp
 copy2ext proc
     mov [si].EMM._size,ecx
     push ecx
-    push bx
+    push ebx
+    cmp word ptr cs:[GDTR], sizeGDT_VCPI-1
+    je @F
+
     mov ah,0bh
     call xmsaddr
-    pop bx
+    jmp @@movedone
+
+@@:
+;--- EMS mode - assumes intent is srchdl = 0!
+    mov ah,41h ; get page frame address
+    int 67h
+    test ah,ah
+    stc
+    jnz @F
+    mov fs,bx ; frame segment - don't mess with it until done with MapEMS4kPage
+
+    push es
+    push edi
+    mov edi,[si].EMM.dstofs
+    push ds
+    push si
+    lds si,[si].EMM.srcofs
+    mov ebx,edi
+    shr ebx,12    ; get index of 4K page
+    and edi,0FFFh ; and offset in that page
+    shr ecx,1     ; convert to word count
+
+@@mapnextpage:
+    invoke MapEMS4kPage, ebx, EMSPG_DATA
+@@:
+    jc @F
+    movsw
+    cmp di,1000h
+    clc
+    loopne @B
+    jcxz @F
+    
+    inc ebx
+    xor di,di
+    jmp @@mapnextpage
+@@:
+    pop si
+    pop ds
+    pop edi
+    pop es
+
+    setc al
+    xor ah,ah
+    btc ax,0 ; CY => AX=0; NC => AX=1
+
+@@movedone:
+    pop ebx
     pop ecx
     cmp ax,1
     mov bp,CStr("error copying to extended memory.")
@@ -758,6 +1244,12 @@ endif
     mov ah,3Eh
     int 21h
 @@:
+    mov dx,emshdl
+    cmp dx,-1
+    jz @F
+    mov ah,45h          ;deallocate pages
+    int 67h
+@@:
     mov dx,xmshdl
     cmp dx,-1
     jz @F
@@ -782,7 +1274,7 @@ switch2rm proc
 ;--- disable paging first (PluM modification)
     mov eax,cr0
     and eax,7fffffffh
-    mov cr0, eax
+    mov cr0,eax
 ;--- disable long mode
 if ?RESETLME
     mov ecx,0C0000080h  ; EFER MSR
@@ -795,8 +1287,17 @@ if ?RESETPAE
     and al,0DFh         ; reset bit 5, disable PAE paging
     mov cr4,eax
 endif
-;--- PluM modification: now disable protection
-;--- TODO: (or switch to VM86 mode)
+;--- PluM modification: now disable protection, or switch to VM86 mode
+    cmp word ptr cs:[GDTR], sizeGDT_VCPI-1
+    jne @F
+    mov eax, cs:[vcpiCR3]
+    mov cr3, eax        ; reinstate VCPI page table
+    mov eax,cr0
+    or eax,80000000h
+    mov cr0,eax         ; and reenable paging
+    jmp vcpi_switch2vm86
+
+@@:
     mov eax, cr0
     and al, 0feh
     mov cr0, eax
@@ -806,12 +1307,86 @@ endif
     ret
 switch2rm endp
 
+vcpi_switch2vm86 proc
+    cli
+;--- VCPI requires a flat selector in DS for this...
+    push SEL_FLAT
+    pop ds
+
+    push eax
+    push ebx
+    mov ebx,esp
+
+;--- setup segments - make a tiny model...
+    movzx eax,cs:[wStkBot+2]
+    push eax ; GS
+    push eax ; FS
+    push eax ; DS
+    push eax ; ES
+    push eax ; SS
+    push ebx ; ESP
+    sub esp,4 ; EFLAGS
+    push eax ; CS
+    pushd offset @@vcpi_returnOK ; EIP
+
+    mov ax, 0DE0Ch ; switch to VM86
+    call cs:vcpiint
+
+@@vcpi_returnOK:
+    pop ebx
+    pop eax
+    ret
+vcpi_switch2vm86 endp
+
 ;--- switch to protected-mode
 
+vcpi_switch2pm:
+    push esi
+    push cs:[wStkBot]
+    mov cs:[wStkBot], sp
+    cli
+    mov esi,cs
+    shl esi,4
+    add esi,offset vcpiCR3
+    mov ax, 0DE0Ch ;switch to PM
+    int 67h
+
+vcpi_switchOK:
+    mov ax, SEL_DATA16
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov sp, [wStkBot] ; DS is OK now
+
+    pop [wStkBot]
+    pop esi
+;--- now we're in 32-bit PM but the GDT and IDT are full of 64-bit code segments
+;--- so leave interrupts off!
+    ret
+
 switch2pm proc
+    cmp word ptr cs:[GDTR], sizeGDT_VCPI-1
+    jne @F
+    call vcpi_switch2pm
+;--- turn off paging temporarily to reconfigure it for 64-bit mode...
+    mov eax,cr0
+    and eax,7fffffffh
+    mov cr0,eax
+    jmp @@inpm
+
+@@:
     and byte ptr cs:[GDT+SEL_TSS+5], 0FDh ; clear busy bit
     @lgdt cs:[GDTR]
     @lidt cs:[IDTR]
+;--- enable protected mode but not paging (yet)
+    mov eax,cr0
+    or al,1
+    mov cr0,eax
+    jmp @F
+@@:
+    mov ax, SEL_TSS
+    ltr ax
+@@inpm:
 ;--- (re)enable long mode
 if ?RESETLME
     mov ecx,0C0000080h  ; EFER MSR
@@ -825,15 +1400,13 @@ if ?RESETPAE
     mov cr4,eax
 endif
 if ?SETCR3
-    mov eax,cs:pPML4
+    mov eax,cs:pRealPML4
     mov cr3,eax
 endif
-;--- enable protected-mode + paging
+;--- enable paging
     mov eax,cr0
-    or eax,80000001h
+    or eax,80000000h
     mov cr0,eax
-    mov ax, SEL_TSS
-    ltr ax
     ret
 switch2pm endp
 
@@ -888,7 +1461,7 @@ make_int_gates proc
 make_int_gates endp
 
 ;--- create IDT for long mode
-;--- DI->4 KB buffer
+;--- ES:DI->4 KB buffer
 ;--- EBX->linear address of _TEXT64 segment
 
 createIDT proc
@@ -921,13 +1494,13 @@ make_exc_gates:
 
     push di
     push di
-    lea di,[di+?MPIC*16]
+    lea di,es:[di+?MPIC*16]
     mov cx,8
     mov edx,offset Irq0007
-    ;mov si, 8E00h ; PluM 1 August 2021: this would turn on interrupts in IRQ handlers - that can't be right (causes races)
+    mov si, 8E00h
     call make_int_gates
     pop di
-    lea di,[di+?SPIC*16]
+    lea di,es:[di+?SPIC*16]
     mov cx,8
     mov edx,offset Irq080F
     call make_int_gates
@@ -946,9 +1519,9 @@ nextitem:
     shl dx,4
     push di
     add di,dx
-    mov [di],ax
+    mov es:[di],ax
     shr eax,16
-    mov [di+6],ax
+    mov es:[di+6],ax
     pop di
     loop nextitem
     ret
@@ -1103,8 +1676,11 @@ long_start proc
     lea rsp,[rcx+rbx]
 
 ;--- PluM modification 1 August 2021: setup TSS for alt stacks etc.
+    cmp word ptr [GDTR],sizeGDT_VCPI-1
+    je @F           ; VCPI already did this, so it's busy
     mov ax,SEL_TSS
     ltr ax
+@@:
 
     sti             ; stack pointer(s) ok, interrupts can be used
 
@@ -1299,7 +1875,12 @@ procname proc
 ;--- SS still holds a selector - hence a possible temporary 
 ;--- stack switch inside irq handler would cause a crash.
     mov ss,cs:[wStkBot+2]
-    int interrupt
+    push es
+    push 0
+    pop es
+    pushf
+    call far16 ptr es:[interrupt*4]
+    pop es
     cli
     call switch2pm  ;modifies eax [, ecx, edx]
 
@@ -1335,10 +1916,25 @@ p&prefix&_rm label fword
     dw SEL_CODE16
     .code _TEXT64
 prefix:
+;--- RM IRQ handler can't be trusted to preserve upper dwords of GP regs
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rbp
+    push rsi
+    push rdi
     mov [qwRSP],rsp
-    mov sp,[wStkBot]
+    movzx esp,[wStkBot]
     call p&prefix&_rm
     mov rsp,[qwRSP]
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
     iretq
 endm
 
@@ -1430,7 +2026,7 @@ pback_to_real label ptr far16
     .code _TEXT64
 int21_4c:
     cli
-    mov sp,[wStkBot]
+    movzx esp,[wStkBot]
     jmp [pback_to_real]
 int21 endp
 

@@ -171,6 +171,9 @@ vcpiadr dd -1
 	dw SEL_VCPICODE
 emshdl  dw -1
 fhandle dw -1
+vPIC	label word
+vPICM	db 8     ;saved master PIC vector
+vPICS	db 70h   ;saved slave PIC vector
 
     .data?
 
@@ -412,6 +415,13 @@ start16 proc
     mov bp,CStr("too much extended memory needed")
     jnz @@error
 
+;--- prepare EMB moves
+    mov emm.srchdl, 0
+    mov emm2.srchdl, 0
+    mov word ptr emm.srcofs+2, ds
+    mov word ptr emm2.srcofs+0, sp
+    mov word ptr emm2.srcofs+2, ss
+
 ;--- are we using EMS or XMS?
     cmp word ptr [GDTR], sizeGDT_VCPI-1
     je @@ems_alloc
@@ -459,13 +469,6 @@ start16 proc
     mov pRealPML4, eax  ; in XMS mode, physical and "unreal" addxs are the same
     add eax,1000h
     mov PhysCurr, eax	; start of free physical pages
-
-;--- prepare EMB moves
-    mov emm.srchdl, 0
-    mov emm2.srchdl, 0
-    mov word ptr emm.srcofs+2, ds
-    mov word ptr emm2.srcofs+0, sp
-    mov word ptr emm2.srcofs+2, ss
 
 ;--- setup ebx/rbx with linear address of _TEXT64
 
@@ -572,6 +575,22 @@ start16 proc
     mov ebx,seg long_start
     shl ebx,4
     add [llgofs], ebx
+
+;--- check if anyone has reprogrammed the PIC, and setup our IDT accordingly
+    mov ax,0DE0Ah
+    push bx
+    int 67h
+    mov vPICM,bl
+    mov vPICS,cl
+    cmp vPIC,7008h
+    je @F                          ; nope, nobody reprogrammed it
+
+    mov [tab1],bx                  ; clock vector (IRQ0)
+    inc bx
+    mov [tab1+4],bx                ; kbd vector (IRQ1)
+
+@@:
+    pop bx
     call createIDT
 
     mov ax,0DE01h                  ; get protected mode interface
@@ -775,6 +794,9 @@ endif
     mov ax,2523h
     int 21h
 
+    cmp vPIC,7008h
+    jne @F
+
     call setints
 
     cli
@@ -790,6 +812,8 @@ endif
     mov dx,?SPIC shl 8 or ?MPIC
     call setpic
 
+@@:
+    cli
     cmp word ptr [GDTR], sizeGDT_VCPI-1
     je @F
     @lgdt [GDTR]
@@ -1233,7 +1257,9 @@ if ?RESETPAE eq 0
     mov cr4,eax
 endif
 
-    mov dx,7008h
+    mov dx,vPIC
+    cmp dx,7008h
+    jne @@exit
     call setpic
     call restoreints
 @@exit::
@@ -1640,6 +1666,19 @@ if ?SPIC ne 70h
     mov al,bPICS
     out 0A1h,al
 endif
+
+    cmp word ptr [GDTR], sizeGDT_VCPI-1
+    jne @F
+    push bx
+    push cx
+    movzx bx,dl
+    movzx cx,dh
+    mov ax,0DE0Bh
+    int 67h
+    pop cx
+    pop bx
+
+@@:
     ret
 setpic endp
 
@@ -2057,6 +2096,22 @@ int31_300:
     push rdi
     mov rsi,rdi
 
+;--- Save FS and GS (selectors + bases) since "usermode" may use them
+
+    mov ecx, 0c0000100h ; fs base
+    rdmsr
+    shl rdx,32
+    or rax,rdx
+    push rax
+    push fs
+
+    mov ecx, 0c0000101h ; gs base
+    rdmsr
+    shl rdx,32
+    or rax,rdx
+    push rax
+    push gs
+
 ;--- the contents of the RMCS has to be copied
 ;--- to conventional memory. We use the DGROUP stack
 
@@ -2093,6 +2148,22 @@ int31_300:
 ;    mov ss,eax       ;but interrupts need a valid SS
     mov rsp,[qwRSP]
 
+;--- Restore FS and GS since "usermode" may use them
+
+    pop gs
+    mov ecx, 0c0000101h ; gs base
+    pop rax
+    mov rdx,rax
+    shr rdx,32
+    wrmsr
+
+    pop fs
+    mov ecx, 0c0000100h ; fs base
+    pop rax
+    mov rdx,rax
+    shr rdx,32
+    wrmsr
+
     mov rdi,[rsp]
     cld
     movsq   ;copy 2Ah bytes back, don't copy CS:IP & SS:SP fields
@@ -2116,7 +2187,7 @@ int31_203:
     jae ret_with_carry
     push rax
     push rdi
-    mov edi,?IDTADR
+    mov edi,dword ptr [IDTR+2]
     movzx eax,bl
     shl eax,4
     add edi,eax
@@ -2126,9 +2197,9 @@ int31_203:
     mov ax,cx
     stosw
     mov ax,8E00h
-    stosd           ;+store highword edx!
-    shr rax,32
-    stosd
+    stosq           ;+store highword edx!
+    ;shr rax,32
+    ;stosd
     pop rdi
     pop rax
     iretq

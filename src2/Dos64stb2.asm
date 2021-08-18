@@ -25,9 +25,10 @@ DGROUP group _TEXT	;makes a tiny model
 
 ?MPIC  equ 78h	; master PIC base, remapped to 78h
 ?SPIC  equ 70h	; slave PIC, isn't changed
-?RESETLME equ 1;1=(re)set EFER.LME for temp switch to real-mode
+?RESETLME equ 0;1=(re)set EFER.LME for temp switch to real-mode
 ?RESETPAE equ 1;1=(re)set CR4.PAE  for temp switch to real-mode
 ?SETCR3   equ 1;1=set CR3 after temp switch to real-mode
+?SETFSGS  equ 1;1=save/restore FS/GS selectors and bases for temp switch
 ?IDTADR   equ 100000h	;address of IDT
 ?DFSTKADR equ (1 shl 47) - 8	;address of double-fault stack for TSS
 ?KSTKADR  equ ?DFSTKADR - 100h	;address of "kernel" stack for TSS
@@ -94,7 +95,8 @@ endm
 
     assume ds:DGROUP
 
-;--- PluM modification 1 August 2021: add TSS
+;--- TSS to specify ISTs for stack fault and double fault
+
 TSS	dd 0	;reserved
 RSP_r0	dq ?KSTKADR
 RSP_r1	dq 0
@@ -125,12 +127,12 @@ SEL_FLAT equ $-GDT
 SEL_TSS equ $-GDT
     dw sizeTSS-1,offset TSS,8900h,40h
     dq 0		; TSS descriptor 16 bytes in long mode??
-sizeGDT equ $-GDT       ; PluM modification 31 July 2021 (make it more generic)
+sizeGDT equ $-GDT
 SEL_VCPICODE equ $-GDT
     dq 3 dup (0)	; VCPI allocates three 8-byte descriptors
 sizeGDT_VCPI equ $-GDT
 
-;--- PluM modification 2 August 2012: VCPI control structure
+;--- VCPI control structure
 vcpiCR3	dd 0		; not the long-mode CR3, a 32-bit one!
 vcpiGDT dd offset GDTR
 vcpiIDT	dd offset IDTR
@@ -259,7 +261,6 @@ start16 proc
     popf
     adc byte ptr [GDT + SEL_TSS + 4], al
 
-;--- PluM 2 August 2021: do this first, so EMS v XMS code can be grouped
     xor edx,edx
     mov eax,80000001h   ; test if long-mode is supported
     cpuid
@@ -406,7 +407,7 @@ start16 proc
 ;--- 3 for remainder of PDPT,PD,PT
 ;--- 1 for PML4
 ;--- 3 (PT,PD,PDPT) for mapping DOS conventional memory
-;--- PluM (1 August): 1/2 for alt stacks (particularly for double fault)
+;--- 1/2 for alt stacks (particularly for double fault)
 ;--- 3/6 (PT,PD,PDPT)*1/2 to point at the alt stacks
 ;--- 1 extra page that may be needed to align to page boundary
     add edx,3+1+3+(EXTRASTKPGS*4)+1
@@ -706,7 +707,7 @@ start16 proc
     shr ebx,12 ; convert to page count
     invoke MapPages, ebx, 0, 0
 
-;--- PluM modification 1 August: create alt stack(s)
+;--- create alt stack(s)
     add PhysCurr,1000h
     invoke MapPages, 1, KSTKBTM, PhysCurr
 if EXTRASTKPGS eq 2
@@ -1236,13 +1237,16 @@ readsection endp
 
 backtoreal proc
 
-;--- PluM refactoring 31 July 2021
     call switch2rm
 
 @@exit2::
     mov ax, cs
     mov ss, ax          ; SS=DGROUP
     mov ds, ax          ; DS=DGROUP
+
+;--- in VCPI mode, switch2rm has already reset LME and PAE, so don't do it again
+    cmp word ptr cs:[GDTR], sizeGDT_VCPI-1
+    je @F
 
 if ?RESETLME eq 0
     mov ecx,0C0000080h  ; EFER MSR
@@ -1257,6 +1261,7 @@ if ?RESETPAE eq 0
     mov cr4,eax
 endif
 
+@@:
     mov dx,vPIC
     cmp dx,7008h
     jne @@exit
@@ -1297,23 +1302,32 @@ backtoreal endp
 ;--- switch to real-mode
 
 switch2rm proc
-;--- disable paging first (PluM modification)
+;--- disable paging first
     mov eax,cr0
     and eax,7fffffffh
     mov cr0,eax
+
 ;--- disable long mode
-if ?RESETLME
+if ?RESETLME eq 0
+    cmp word ptr cs:[GDTR], sizeGDT_VCPI-1
+    jne @F
+endif
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     and ah,0feh
     wrmsr
+
+@@:
+if ?RESETPAE eq 0
+    cmp word ptr cs:[GDTR], sizeGDT_VCPI-1
+    jne @F
 endif
-if ?RESETPAE
     mov eax,cr4
     and al,0DFh         ; reset bit 5, disable PAE paging
     mov cr4,eax
-endif
-;--- PluM modification: now disable protection, or switch to VM86 mode
+
+@@:
+;--- now disable protection, or switch to VM86 mode
     cmp word ptr cs:[GDTR], sizeGDT_VCPI-1
     jne @F
     mov eax, cs:[vcpiCR3]
@@ -1414,21 +1428,30 @@ switch2pm proc
     ltr ax
 @@inpm:
 ;--- (re)enable long mode
-if ?RESETLME
+if ?RESETLME eq 0
+    cmp word ptr cs:[GDTR], sizeGDT_VCPI-1
+    jne @F
+endif
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     or ah,1
     wrmsr
+@@:
+if ?RESETPAE eq 0
+    cmp word ptr cs:[GDTR], sizeGDT_VCPI-1
+    jne @F
 endif
-if ?RESETPAE
     mov eax,cr4
     or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
     mov cr4,eax
+@@:
+if ?SETCR3 eq 0
+    cmp word ptr cs:[GDTR], sizeGDT_VCPI-1
+    jne @F
 endif
-if ?SETCR3
     mov eax,cs:pRealPML4
     mov cr3,eax
-endif
+@@:
 ;--- enable paging
     mov eax,cr0
     or eax,80000000h
@@ -1698,10 +1721,12 @@ long_start proc
 ;--- ensure ss is valid!
     mov ax,SEL_DATA16
     mov ss,eax
-;--- PluM modification 31 July 2021:
+
+if ?SETFSGS
 ;--- and fs/gs so we don't triple-fault trying to save/restore them in IRQs!
     mov fs,eax
     mov gs,eax
+endif
 
 ;--- linear address of image start (=PE header) should be in edx::ebx
 ;--- move it to rbx using registers only.
@@ -1717,7 +1742,7 @@ long_start proc
     add rcx,[rbx].IMAGE_NT_HEADERS.OptionalHeader.SizeOfStackReserve
     lea rsp,[rcx+rbx]
 
-;--- PluM modification 1 August 2021: setup TSS for alt stacks etc.
+;--- setup TSS for alt stacks etc.
     cmp word ptr [GDTR],sizeGDT_VCPI-1
     je @F           ; VCPI already did this, so it's busy
     mov ax,SEL_TSS
@@ -1899,7 +1924,7 @@ procname proc
     push eax
     push ecx
     push edx
-;--- PluM modification 31 July 2021: 
+if ?SETFSGS
 ;--- Save FS and GS (selectors + bases) since "usermode" may use them
     mov ecx, 0c0000100h ; fs base
     rdmsr
@@ -1912,6 +1937,7 @@ procname proc
     push edx
     push eax
     push gs
+endif
 
     call switch2rm  ;modifies eax [, ecx, edx]
 ;--- SS still holds a selector - hence a possible temporary 
@@ -1926,7 +1952,7 @@ procname proc
     cli
     call switch2pm  ;modifies eax [, ecx, edx]
 
-;--- PluM modification 31 July 2021: 
+if ?SETFSGS
 ;--- Restore FS and GS since "usermode" may use them
     pop gs
     mov ecx, 0c0000101h ; gs base
@@ -1939,6 +1965,7 @@ procname proc
     pop eax
     pop edx
     wrmsr
+endif
 
     pop edx
     pop ecx
@@ -2096,8 +2123,8 @@ int31_300:
     push rdi
     mov rsi,rdi
 
+if ?SETFSGS
 ;--- Save FS and GS (selectors + bases) since "usermode" may use them
-
     mov ecx, 0c0000100h ; fs base
     rdmsr
     shl rdx,32
@@ -2111,6 +2138,7 @@ int31_300:
     or rax,rdx
     push rax
     push gs
+endif
 
 ;--- the contents of the RMCS has to be copied
 ;--- to conventional memory. We use the DGROUP stack
@@ -2148,8 +2176,8 @@ int31_300:
 ;    mov ss,eax       ;but interrupts need a valid SS
     mov rsp,[qwRSP]
 
+if ?SETFSGS
 ;--- Restore FS and GS since "usermode" may use them
-
     pop gs
     mov ecx, 0c0000101h ; gs base
     pop rax
@@ -2163,6 +2191,7 @@ int31_300:
     mov rdx,rax
     shr rdx,32
     wrmsr
+endif
 
     mov rdi,[rsp]
     cld
@@ -2198,8 +2227,6 @@ int31_203:
     stosw
     mov ax,8E00h
     stosq           ;+store highword edx!
-    ;shr rax,32
-    ;stosd
     pop rdi
     pop rax
     iretq

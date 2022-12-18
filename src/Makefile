@@ -10,4 +10,4 @@ $(ODIR):
 	@mkdir $(ODIR)
 
 $(ODIR)\Dos64stb.bin: Dos64stb.asm
-	@jwasm -nologo -mz -Sg -Fl$* -Fo$(ODIR)\Dos64stb.bin Dos64stb.asm
+	@jwasm -nologo -mz -W3 -Sg -Fl$* -Fo$(ODIR)\Dos64stb.bin Dos64stb.asm

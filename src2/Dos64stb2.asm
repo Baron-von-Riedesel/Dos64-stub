@@ -25,9 +25,8 @@ DGROUP group _TEXT	;makes a tiny model
 
 ?MPIC  equ 78h	; master PIC base, remapped to 78h
 ?SPIC  equ 70h	; slave PIC, isn't changed
-?RESETLME equ 0;1=(re)set EFER.LME for temp switch to real-mode
+?RESETLME equ 1;1=(re)set EFER.LME for temp switch to real-mode
 ?RESETPAE equ 1;1=(re)set CR4.PAE  for temp switch to real-mode
-?SETCR3   equ 1;1=set CR3 after temp switch to real-mode
 ?IDTADR   equ 100000h	;address of IDT
 
 EMM struct  ;XMS block move help struct
@@ -55,7 +54,9 @@ endm
 endm
 @lidt macro addr
 ;--- 16-bit variant ok, IDT remains in 24-bit address space
-;    db 66h
+if ?IDTADR ge 1000000h
+    db 66h
+endif
     lidt addr
 endm
 
@@ -101,7 +102,7 @@ GDTR label fword        ; Global Descriptors Table Register
     dd offset GDT       ; linear address of GDT
 IDTR label fword        ; IDTR in long mode
     dw 256*16-1         ; limit of IDT (size minus one)
-    dd 0                ; linear address of IDT
+    dd ?IDTADR          ; linear address of IDT
 nullidt label fword     ; IDTR for real-mode
     dw 3FFh
     dd 0
@@ -111,7 +112,7 @@ dwCSIP  label dword
 adjust  dd 0
 pPML4   dd 0
 retad   label fword
-        dd 0
+        dd offset start64
         dw SEL_CODE64
 xmshdl  dw -1
 fhandle dw -1
@@ -131,9 +132,9 @@ sechdr  IMAGE_SECTION_HEADER <>
 emm     EMM <>   ;xms block move structure
 emm2    EMM <>   ;another one for nested calls
 qwRSP    dq ?    ;protected-mode RSP
-PhysBase dd ?    ;physical address start memory block (aligned to page)
-PhysCurr dd ?    ;physical address free memory
-ImgBase dd ?     ;physical address image base
+physBase dd ?    ;physical page start memory block
+physCurr dd ?    ;physical page free memory
+physImg  dd ?    ;physical page image base
 ImgSize dd ?     ;image size in 4kB pages
 fname   dd ?     ;file name of executable
 wStkBot dw ?,?   ;real-mode stack bottom, offset & segment
@@ -147,7 +148,7 @@ endif
 
     .code
 
-MapPages proto stdcall pages:dword, linaddr:qword, physaddr:dword
+MapPages proto stdcall :qword, :dword, :dword
 
 start16 proc
 
@@ -341,6 +342,8 @@ start16 proc
     shl ecx,10  ;pages to dword
     xor eax,eax
     @rep stosd
+    push ds
+    pop es
 
 ;--- align to page boundary
 
@@ -351,10 +354,11 @@ start16 proc
     movzx eax,ax
     mov adjust, eax
     add eax, ebx
-    mov PhysBase, eax
     mov pPML4, eax      ; allocate the first page for PML4
-    add eax,1000h
-    mov PhysCurr, eax	; start of free physical pages
+	shr eax,12
+    mov physBase, eax
+	inc eax
+    mov physCurr, eax	; start of free physical pages
 
 ;--- prepare EMB moves
     mov emm.srchdl, 0
@@ -364,42 +368,41 @@ start16 proc
     mov word ptr emm2.srcofs+2, ss
 
 ;---  map conventional memory
-    invoke MapPages, 256, 0, 0
+    invoke MapPages, 0, 0, 256
 
 ;--- setup ebx/rbx with linear address of _TEXT64
 
-    mov ebx,seg long_start
+    mov ebx,seg start64
     shl ebx,4
-    add [llgofs], ebx
+    add dword ptr [retad], ebx
 
 ;--- init IDT
 
     mov di,sp
-    push ds
-    pop es
     call createIDT
 
-    mov eax,PhysCurr
-    add PhysCurr,1000h
+    mov eax,physCurr
+    inc physCurr
     push eax
-    sub eax,PhysBase
+    sub eax,physBase
+	shl eax,12
     add eax,adjust
     mov emm2.dstofs, eax
     mov ecx, 1000h		;copy IDT to ext memory
     mov si, offset emm2
     call copy2ext
     pop ecx
-;--- map IDT at 0x100000h
-    mov eax, ?IDTADR
-    mov dword ptr [IDTR+2], eax
-    invoke MapPages, 1, ?IDTADR, ecx
 
-    mov eax,PhysCurr
+;--- map IDT at 0x100000h
+    invoke MapPages, ?IDTADR, ecx, 1
+
+    mov eax,physCurr
     mov ecx,ImgSize
-    shl ecx,12
-    add PhysCurr, ecx
-    mov ImgBase, eax
-    sub eax, PhysBase
+;    shl ecx,12
+    add physCurr, ecx
+    mov physImg, eax
+    sub eax, physBase
+	shl eax,12
     add eax, adjust
     mov emm.dstofs, eax
 
@@ -461,7 +464,7 @@ start16 proc
     cmp eax,1ffffh
     jnz @@error
 @@:
-    invoke MapPages, ImgSize, nthdr.OptionalHeader.ImageBase, ImgBase
+    invoke MapPages, nthdr.OptionalHeader.ImageBase, physImg, ImgSize
     jc @@error
 
 ;--- done setup the extended memory block;
@@ -491,31 +494,16 @@ if ?SPIC ne 70h
 endif
     mov dx,?SPIC shl 8 or ?MPIC
     call setpic
-    @lgdt [GDTR]
-    @lidt [IDTR]
 
-    mov eax,cr4
-    or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
-    mov cr4,eax
-
+ife ?RESETLME
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr               ; value is returned in EDX::EAX!
     or ah,1             ; enable long mode
     wrmsr
+endif
+    call switch2pm
+    jmp [retad]
 
-;--- long_start expects linear address of image base (PE header) in edx:ebx.
-;--- obsolete, since variables in DGROUP can be accessed directly
-;    mov ebx,dword ptr nthdr.OptionalHeader.ImageBase+0
-;    mov edx,dword ptr nthdr.OptionalHeader.ImageBase+4
-
-;--- enable protected-mode + paging
-    mov eax,cr0
-    or eax,80000001h
-    mov cr0,eax
-
-    db 66h,0eah         ; jmp far32
-llgofs dd offset long_start
-    dw SEL_CODE64
 @@error::
     mov si,bp
 nextchar:
@@ -538,10 +526,10 @@ start16 endp
 
 ;--- create address space and map pages
 ;--- linaddr: start linear address space to create
-;--- physaddr: start physical block to map
+;--- physpage: start physical page to map
 ;--- pages: no of pages to map
 
-MapPages proc stdcall uses es pages:dword, linaddr:qword, physaddr:dword
+MapPages proc stdcall uses es linaddr:qword, physpage:dword, pages:dword
 
     call EnableUnreal
     .while pages
@@ -564,13 +552,19 @@ MapPages proc stdcall uses es pages:dword, linaddr:qword, physaddr:dword
         mov cx,3
         mov ebx,pPML4
 @@:
-        mov edx,es:[ebx+eax]
-        .if (edx == 0)             ;does PDPTE/PDE/PTE exist?
-            mov edx,PhysCurr
-            add PhysCurr,1000h
+        add ebx,eax
+        mov edx,es:[ebx]
+        .if edx == 0             ;does PDPTE/PDE/PTE exist?
+            mov edx,physCurr
+;--- the paging tables must be located below 4GB;
+;--- if this is to be changed, unreal mode cannot be used here!
+;            sub eax,eax
+;            shld eax,edx,12
+            shl edx,12
             or dl,11b
-            mov es:[ebx+eax],edx
-;           mov es:[ebx+eax+4],x   ;if phys ram > 4 GB is used
+            mov es:[ebx+0],edx
+;            mov es:[ebx+4],eax
+            inc physCurr
         .endif
         pop eax
         and eax,0ff8h
@@ -579,14 +573,18 @@ MapPages proc stdcall uses es pages:dword, linaddr:qword, physaddr:dword
         and bx,0F000h
         loop @B
 
-        test byte ptr es:[ebx+eax],1     ;something already mapped there?
+        add ebx,eax
+        test byte ptr es:[ebx],1     ;something already mapped there?
         stc
         jnz exit
-        mov edx,physaddr
-        add physaddr,1000h
+        mov edx,physpage
+        sub eax,eax
+        shld eax,edx,12
+        shl edx,12
         or dl,11b
-        mov es:[ebx+eax],edx
-;       mov dword ptr es:[ebx+eax+4],x	;if phys ram > 4 GB is used
+        mov es:[ebx+0],edx
+        mov es:[ebx+4],eax
+        inc physpage
         add dword ptr linaddr+0,1000h
         adc dword ptr linaddr+4,0
         dec pages
@@ -642,8 +640,9 @@ copy2ext endp
 
 readsection proc
 
-    mov eax, ImgBase
-    sub eax, PhysBase
+    mov eax, physImg
+    sub eax, physBase
+    shl eax,12
     add eax, adjust
     add eax, sechdr.VirtualAddress
     mov emm2.dstofs, eax
@@ -678,26 +677,23 @@ readsection endp
 
 backtoreal proc
 
-    mov eax,cr0
-    and eax,7ffffffeh   ; disable protected-mode & paging
-    mov cr0,eax
-    jmp far16 ptr @F
-@@:
+    call switch2rm
 @@exit2::
     mov ax, cs
     mov ss, ax          ; SS=DGROUP
     mov ds, ax          ; DS=DGROUP
-    @lidt [nullidt]     ; IDTR=real-mode compatible values
 
+ife ?RESETLME
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     and ah,0feh         ; disable long mode (EFER.LME=0)
     wrmsr
-
+endif
+ife ?RESETPAE
     mov eax,cr4
     and al,0DFh         ; reset bit 5, disable PAE paging
     mov cr4,eax
-
+endif
     mov dx,7008h
     call setpic
     call restoreints
@@ -769,14 +765,12 @@ if ?RESETPAE
     or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
     mov cr4,eax
 endif
-if ?SETCR3
 ;    mov eax,cr3        ; useless to check if CR will change because
 ;    cmp eax,cs:pPML4   ; turning paging off has reset the TLB
 ;    jz @F
     mov eax,cs:pPML4
     mov cr3,eax
 ;@@:
-endif
 ;--- enable protected-mode + paging
     mov eax,cr0
     or eax,80000001h
@@ -1021,7 +1015,7 @@ _TEXT64 ends
 	.code _TEXT64
 ;    assume ds:FLAT, es:FLAT, ss:FLAT
 
-long_start proc
+start64 proc
 
 ;--- ensure ss is valid!
     mov ax,SEL_DATA16
@@ -1049,7 +1043,7 @@ long_start proc
     call rsi
     mov ah,4Ch
     int 21h
-long_start endp
+start64 endp
 
 if 0
 ;--- handle base relocs of PE image

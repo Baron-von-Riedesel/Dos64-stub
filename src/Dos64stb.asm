@@ -29,7 +29,7 @@ DGROUP group _TEXT	;makes a tiny model
 ?HEAP  equ 0    ; 1=add heapsize of image to amount of memory to be allocated
 ?MPIC  equ 78h  ; master PIC base, remapped to 78h
 ?SPIC  equ 70h  ; slave PIC, isn't changed
-?RESETLME equ 0 ;1=(re)set EFER.LME for temp switch to real-mode
+?RESETLME equ 1 ;1=(re)set EFER.LME for temp switch to real-mode
 ?RESETPAE equ 1 ;1=(re)set CR4.PAE  for temp switch to real-mode
 ?SETCR3   equ 1 ;1=set CR3 after temp switch to real-mode
 
@@ -105,6 +105,9 @@ IDTR label fword        ; IDTR in long mode
 nullidt label fword     ; IDTR for real-mode
     dw 3FFh
     dd 0
+retad label fword
+    dd offset start64
+    dw SEL_CODE64
   
 xmsaddr dd 0
 dwCSIP  label dword
@@ -348,10 +351,10 @@ memsizeok:
     call createPgTabs
 
 ;--- setup ebx/rbx with linear address of _TEXT64
-    mov ebx,seg long_start
+    mov ebx,seg start64
     shl ebx,4
-    add [llgofs], ebx
-    add [llgofs2], ebx
+    add dword ptr [retad], ebx
+
 ;--- init IDT
     mov eax,ImgBase
     sub eax,1000h
@@ -430,33 +433,17 @@ endif
     cli
     mov dx,?SPIC shl 8 or ?MPIC
     call setpic
-    @lgdt [GDTR]
-    @lidt [IDTR]
 
-    mov edx,PhysBase    ; 24.10.2020: set CR3 here, after all DOS/XMS stuff is done
-    mov cr3,edx         ; load page-map level-4 base
-
-;--- long_start expects linear address of image base (PE header) in ebx.
-;--- obsolete, since the variables may be accessed from 64-bit directly.
-;    mov ebx,ImgBase
-
-    mov eax,cr4
-    or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
-    mov cr4,eax
-
+ife ?RESETLME
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     or ah,1             ; enable long mode
     wrmsr
+endif
+    call switch2pm
 
-;--- enable protected-mode + paging
-    mov eax,cr0
-    or eax,80000001h
-    mov cr0,eax
+    jmp [retad]
 
-    db 66h,0eah         ; jmp far32
-llgofs dd offset long_start
-    dw SEL_CODE64
 @@error::
     mov si,bp
 nextchar:
@@ -537,25 +524,23 @@ readsection endp
 
 backtoreal proc
 
-    mov eax,cr0
-    and eax,7ffffffeh   ; disable protected-mode & paging
-    mov cr0,eax
-    jmp far16 ptr @F
-@@:
+    call switch2rm
 @@exit2::
     mov ax, cs
     mov ss, ax          ; SS=DGROUP
     mov ds, ax          ; DS=DGROUP
-    @lidt [nullidt]     ; IDTR=real-mode compatible values
 
+ife ?RESETLME
     mov ecx,0C0000080h  ; EFER MSR
     rdmsr
     and ah,0feh         ; disable long mode (EFER.LME=0)
     wrmsr
-
+endif
+ife ?RESETPAE
     mov eax,cr4
     and al,0DFh         ; reset bit 5, disable PAE paging
     mov cr4,eax
+endif
 
     mov dx,7008h
     call setpic
@@ -653,6 +638,8 @@ switch2pm endp
 call_rmode proc
 
     call switch2rm
+	pop dword ptr cs:[retad]
+	add sp,4
     popad
     pop cs:wFlags
     pop es
@@ -675,9 +662,7 @@ backtopm:
     pushad
     movzx esp,sp
     call switch2pm
-    db 66h,0eah         ; jmp far32
-llgofs2 dd offset back_to_long
-    dw SEL_CODE64
+	jmp cs:[retad]
 
 call_rmode endp
 
@@ -959,7 +944,7 @@ _TEXT64 segment para use64 public 'CODE'
 
 ;    assume ds:FLAT, es:FLAT, ss:FLAT
 
-long_start proc
+start64 proc
 
 ;--- ensure ss is valid.
     mov ax,SEL_DATA16
@@ -983,7 +968,7 @@ long_start proc
     call rsi
     mov ah,4Ch
     int 21h
-long_start endp
+start64 endp
 
 ;--- handle base relocs of PE image
 
@@ -1287,8 +1272,8 @@ ret_with_carry:
     or byte ptr [rsp+2*8],1 ;set carry flag
     iretq
     .data
-pcall_rmode label ptr far16
-    dw offset call_rmode
+pcall_rmode label ptr far32
+    dd offset call_rmode
     dw SEL_CODE16
     .code _TEXT64
 int31_300:
@@ -1329,8 +1314,8 @@ int31_300:
 @@:
     stosd
     mov esp,ebx	;clear highword ESP, ESP is used inside call_rmode
-    jmp [pcall_rmode]
-back_to_long::
+    call [pcall_rmode]
+;back_to_long::
     mov edx,DGROUP
     shl edx,4
     lea esi,[esp+edx]
